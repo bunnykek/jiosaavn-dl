@@ -224,7 +224,7 @@ while(1):
         
         #json
         playlist_json = requests.get(playlist_api+playlist_id).json()
-        
+        playlist_path = os.path.join(sys.path[0],"Downloads",f"Playlist - {playlist_json['listname']}")
         playlist_info = f"""
                             Playlist name    : {playlist_json['listname']}
                             Number of tracks : {playlist_json['list_count']}
