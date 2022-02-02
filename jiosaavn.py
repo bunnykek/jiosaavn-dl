@@ -1,4 +1,4 @@
-##jiosaavn-dl
+#jiosaavn-dl
 #made by bunny
 
 import requests
@@ -52,7 +52,7 @@ def playlist_json_handler(json,playlist_path):
         #download the artwork
         subprocess.Popen(["ffmpeg", "-y", "-i", song["image"].replace("150","500"), 
                            "-c", "copy", os.path.join(playlist_path,"cover.jpg")], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT).wait()
-        
+
         #download the track
         download_song(json['songs'].index(song)+1,song,playlist_path,song['primary_artists'],len(json['songs']))
         
@@ -64,7 +64,10 @@ def playlist_json_handler(json,playlist_path):
 def download_song(pos,json,path,album_artists,total=1):
 
     #sanitize
-    json["song"] = json["song"].replace("amp;","").replace("&#039;","'").replace("&quot;","\'")
+    json['song'] = sanitize(json['song'])
+    json["album"] = sanitize(json["album"])
+    json["primary_artists"] = sanitize(json["primary_artists"])
+    json["music"] = sanitize(json["music"])
 
     #setting the song download path
     song_path = os.path.join(path,f"{pos}. {json['song']}.m4a")
@@ -85,6 +88,12 @@ def download_song(pos,json,path,album_artists,total=1):
             print("Done.")
         else:
             print("\nTrack unavailable in your region!")
+
+
+#sanitizer
+def sanitize(string):
+    return (string.replace('&amp;','&').replace('&#039;',"'").replace('"',"'").replace('&quot;',"'"))
+
 
 
 #Tags metadata to a track
@@ -130,12 +139,16 @@ while(1):
 
         response = requests.get(url)
         album_id = get_id(response,"album_id")
+        
+        #getting json
         album_json = requests.get(album_api+album_id).json()
 
-        #sanitize
-        album_json["primary_artists"] = album_json["primary_artists"].replace("amp;","").replace("&#039;","'").replace("&quot;","\'")
-        album_json['title'] = album_json['title'].replace("amp;","").replace("&#039;","'").replace("&quot;","\'")
-        
+        #sanitization
+        album_json["primary_artists"] = sanitize(album_json["primary_artists"])
+        album_json['title'] = sanitize(album_json['title'])
+
+
+
         #setting the album path
         album_path = os.path.join(sys.path[0],"Downloads",(album_json["primary_artists"] if album_json["primary_artists"].count(",")<2 else "Various Artists") + f" - {album_json['title']} [{album_json['year']}]")
         try:
@@ -166,12 +179,17 @@ while(1):
         song_response = requests.get(url)
         song_id = get_id(song_response,"song_id")
         song_json = requests.get(song_api+song_id).json()
+        
+        #getting json 
         song_json = song_json[f'{song_id}']
 
         #sanitize
-        song_json['song'] = song_json['song'].replace("amp;","").replace("&#039;","'").replace("&quot;","\'")
-        song_json["primary_artists"] = song_json["primary_artists"].replace("amp;","").replace("&#039;","'").replace("&quot;","\'")
-        
+        song_json["primary_artists"] = sanitize(song_json["primary_artists"])
+        song_json['song'] = sanitize(song_json['song'])
+        song_json['music'] = sanitize(song_json['music'])
+        song_json['album'] = sanitize(song_json['album'])
+        song_json['has_lyrics'] = sanitize(song_json['has_lyrics'])
+
         #setting up the song directory
         song_path = os.path.join(sys.path[0],"Downloads",(song_json["primary_artists"] if song_json["primary_artists"].count(",")<2 else "Various Artists") + f" - {song_json['song']} [{song_json['year']}]")
         try:
@@ -203,10 +221,9 @@ while(1):
     elif("/playlist/" in url):
         playlist_response = requests.get(url)
         playlist_id = get_id(playlist_response, "listid")
+        
+        #json
         playlist_json = requests.get(playlist_api+playlist_id).json()
-        #sanitize
-        playlist_json['listname'] = playlist_json['listname'].replace("amp;","").replace("&#039;","'").replace("&quot;","\'")
-        playlist_path = os.path.join(sys.path[0],"Downloads",f"Playlist - {playlist_json['listname']}")
         
         playlist_info = f"""
                             Playlist name    : {playlist_json['listname']}
