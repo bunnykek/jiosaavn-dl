@@ -18,15 +18,13 @@ git clone https://github.com/bunnykek/jiosaavn-dl
 cd jiosaavn-dl
 ```
 
-Download the ffmpeg binary(.exe for Windows) for your OS from [here](https://ffbinaries.com/downloads) and put that binary inside ``jiosaavn-dl`` folder
-
 use 'pip3' in the below command if 'pip' doesn't work for you. 
 ```
 pip install -r requirements.txt
 ```
 Use "py" or "python3" if  "python" doesn't  work for you.
 ```
-python jiosaavn.py
+python jiosaavn.py https://www.jiosaavn.com/album/o-saki-saki-from-batla-house/og4DkAosip0_
 ```
 
 The files will be save in the ``jiosaavn-dl/Downloads/`` directory
