@@ -125,7 +125,7 @@ def tagger(json, path, name, album_artists, pos=1, total=1):
     # cover artwork tag
     with open(os.path.join(path, "cover.jpg"), "rb") as f:
         audio["covr"] = [MP4Cover(f.read(), imageformat=MP4Cover.FORMAT_JPEG)]
-
+    audio.pop("©too")
     audio.save()  # tagging done
 
 
