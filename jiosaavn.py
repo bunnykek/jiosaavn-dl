@@ -3,6 +3,7 @@
 
 import requests
 from html import unescape
+from sanitize_filename import sanitize
 import re
 import os
 import sys
@@ -68,10 +69,10 @@ def playlist_json_handler(json, playlist_path):
 def download_song(pos, json, path, album_artists, total=1):
 
     # sanitize
-    json['song'] = unescape(json['song'])
-    json["album"] = unescape(json["album"])
-    json["primary_artists"] = unescape(json["primary_artists"])
-    json["music"] = unescape(json["music"])
+    json['song'] = sanitize(unescape(json['song']))
+    json["album"] = sanitize(unescape(json["album"]))
+    json["primary_artists"] = sanitize(unescape(json["primary_artists"]))
+    json["music"] = sanitize(unescape(json["music"]))
 
     # setting the song download path
     song_path = os.path.join(path, f"{str(pos).zfill(2)}. {json['song']}.m4a")
@@ -150,8 +151,8 @@ if __name__ == "__main__":
         album_json = requests.get(album_api+album_id).json()
 
         # sanitization
-        album_json["primary_artists"] = unescape(album_json["primary_artists"])
-        album_json['title'] = unescape(album_json['title'])
+        album_json["primary_artists"] = sanitize(unescape(album_json["primary_artists"]))
+        album_json['title'] = sanitize(unescape(album_json['title']))
 
         # setting the album path
         album_path = os.path.join(sys.path[0], "Downloads", (album_json["primary_artists"] if album_json["primary_artists"].count(
@@ -190,10 +191,10 @@ if __name__ == "__main__":
         song_json = song_json[f'{song_id}']
 
         # sanitize
-        song_json["primary_artists"] = unescape(song_json["primary_artists"])
-        song_json['song'] = unescape(song_json['song'])
-        song_json['music'] = unescape(song_json['music'])
-        song_json['album'] = unescape(song_json['album'])
+        song_json["primary_artists"] = sanitize(unescape(song_json["primary_artists"]))
+        song_json['song'] = sanitize(unescape(song_json['song']))
+        song_json['music'] = sanitize(unescape(song_json['music']))
+        song_json['album'] = sanitize(unescape(song_json['album']))
         song_json['has_lyrics'] = unescape(song_json['has_lyrics'])
 
         # setting up the song directory
