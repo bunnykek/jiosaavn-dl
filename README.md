@@ -78,3 +78,5 @@ Source stream size                       : 10.2 MiB (99%)
 Default                                  : Yes
 Alternate group                          : 1
 ```
+### Disclaimer
+- I will not be responsible for how you use jiosaavn-dl.
