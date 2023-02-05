@@ -33,37 +33,38 @@ The files will be save in the ``jiosaavn-dl/Downloads/`` directory
 
 ```
 General
-Complete name                            : 1. O Saki Saki (From 'Batla House').m4a
+Complete name                            : C:\Users\bunny\Desktop\jiosaavn-dl\Downloads\Various Artists - Pathaan [2022]\01. Besharam Rang.m4a
 Format                                   : MPEG-4
-Format profile                           : Apple audio with iTunes info
-Codec ID                                 : M4A  (M4A /isom/iso2)
-File size                                : 7.67 MiB
-Duration                                 : 3 min 11 s
+Format profile                           : Base Media
+Codec ID                                 : isom (isom/iso2/mp41)
+File size                                : 10.4 MiB
+Duration                                 : 4 min 18 s
 Overall bit rate mode                    : Constant
 Overall bit rate                         : 337 kb/s
-Album                                    : O Saki Saki (From 'Batla House')
-Album/Performer                          : Tulsi Kumar, Neha Kakkar, B Praak
-Track name                               : O Saki Saki (From 'Batla House')
+Album                                    : Pathaan
+Album/Performer                          : Vishal & Shekhar, Shilpa Rao, Caralisa Monteiro, Vishal Dadlani, Shekhar Ravjiani, Kumaar
+Track name                               : Besharam Rang
 Track name/Position                      : 1
 Track name/Total                         : 1
-Performer                                : Tulsi Kumar, Neha Kakkar, B Praak
-Composer                                 : Tanishk Bagchi, Vishal & Shekhar
-Recorded date                            : 2019
-Copyright                                : © 2019 Super Cassettes Industries Private Limited
+Performer                                : Vishal & Shekhar, Shilpa Rao, Caralisa Monteiro, Vishal Dadlani, Shekhar Ravjiani, Kumaar
+Composer                                 : Vishal & Shekhar
+Recorded date                            : 2022-12-22
+Copyright                                : © 2022 YRF Music
 Cover                                    : Yes
-Lyrics                                   : Main teri aankhon ka saahil / main tere dil ke hee qaabil / Tu musafir main teri manzil /  / Ishq kaa dariyaa hai bahata / Doob ja tujhse hai kahata / haan  meri banhon mein aa ke mil /  / Woh sharabi kya sharabi dil mein jiske gum na ho / Lut gaya samjho sharabi pas jiske hum na ho / saaqi saaqi sa /  / O saki saki re saki saki / aa paas aa rah naa jae koyi khvaahish baaqi / O saki saki re saki saki / aa paas aa rah naa jae koyi khvaahish baaqi /  / tere jesee maashooqa muje yaar chaahiye / naa paisa chaahiye naa hee qaraar chaahiye /  / ho tere jesee maashooqa muje yaar chaahiye / naa paisa chaahiye naa hee qaraar chaahiye /  / ye husn kaa hai khumaar mera tujh pe hai chaaya jo / qurbaan hua  jo mujh pe khushnaseeb badaa hai vo /  / Woh sharabi kya sharabi dil mein jiske gum na ho / Lut gaya samjho sharabi pas jiske hum na ho / saaqi saaqi sa /  / O saki saki re saki saki / aa paas aa rah naa jae koyi khaahish baaqi / O saki saki re saki saki / aa paas aa rah naa jae koyi khaahish baaqi /  / O saki saki re saki saki / aa paas aa rah naa jae koyi khaahish baaqi / O saki saki re saki saki / aa paas aa rah naa jae koyi khaahish baaqi
-Content advisory                         : Clean
+Lyrics                                   : Esta Noche La Vida Es Completa / El Esta Es Cuando La Vida Es Virica / Hamein To Loot Liya Milke / Ishq Waalon Ne / Bohot Hi Tang Kiya Ab Tak / Inn Khayalon Ne / Nasha Chadha Jo Sharifi Ka / Utaar Pheka Hai / Besharam Rang Kahan Dekha / Duniyan Waalon Ne / Hamein To Loot Liya Milke / Ishq Waalon Ne / Bohot Hi Tang Kiya Ab Tak / Inn Khayalon Ne / Nasha Chadha Jo Sharifi Ka / Utaar Phenka Hai / Besharam Rang Kahan Dekha / Duniyan Waalon Ne / Mujhmein Nayi Baat Hai / Nayi Aadaton Ke Saath Hai / Mujhmein Nayi Baat Hai / Nayi Aadaton Ke Saath Hai / Hai Jo Sahi Woh Karna Nahin / Ghalat Hone Ki Yehi To Shuruwat Hai / Esta Noche La Vida Es Completa / El Esta Es Cuando La Vida Es Virica / Nasha Chadha Jo Sharifi Ka / Utaar Pheka Hai / Besharam Rang Kahan Dekha / Duniyan Waalon Ne / Hamein To Loot Liya Milke / Ishq Waalon Ne / Bohot Hi Tang Kiya Ab Tak / Inn Khayalon Ne / Esta Noche La Vida / Ishq Waalon Ne, Es Completa / Hamein To Loot Liya Milke / Ishq Waalon Ne / Esta Noche La Vida / Ishq Waalon Ne, Es Completa / 
+Rating                                   : Clean
 Language                                 : Hindi
-Release date                             : 2019-07-15
-URL                                      : https://www.jiosaavn.com/album/o-saki-saki-from-batla-house/og4DkAosip0_
+Record label                             : YRF Music
+Starring                                 : Shah Rukh Khan, Deepika Padukone, John Abraham
+Singers                                  : Shilpa Rao, Caralisa Monteiro, Vishal Dadlani, Shekhar Ravjiani
 
 Audio
 ID                                       : 1
 Format                                   : AAC LC
 Format/Info                              : Advanced Audio Codec Low Complexity
 Codec ID                                 : mp4a-40-2
-Duration                                 : 3 min 11 s
-Source duration                          : 3 min 11 s
+Duration                                 : 4 min 18 s
+Source duration                          : 4 min 18 s
 Source_Duration_LastFrame                : -11 ms
 Bit rate mode                            : Constant
 Bit rate                                 : 332 kb/s
@@ -72,9 +73,8 @@ Channel layout                           : L R
 Sampling rate                            : 44.1 kHz
 Frame rate                               : 43.066 FPS (1024 SPF)
 Compression mode                         : Lossy
-Stream size                              : 7.57 MiB (99%)
-Source stream size                       : 7.57 MiB (99%)
+Stream size                              : 10.2 MiB (99%)
+Source stream size                       : 10.2 MiB (99%)
 Default                                  : Yes
 Alternate group                          : 1
-mdhd_Duration                            : 191089
 ```
