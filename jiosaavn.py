@@ -17,7 +17,6 @@ playlist_api = "https://www.jiosaavn.com/api.php?__call=webapi.get&token={}&type
 lyrics_api = "https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&ctx=web6dot0&api_version=4&_format=json&_marker=0%3F_marker%3D0&lyrics_id="
 album_song_rx = re.compile("https://www\.jiosaavn\.com/(album|song)/.+?/(.+)")
 playlist_rx = re.compile("https://www\.jiosaavn\.com/s/playlist/.+/(.+)")
-cdn_track_tx = re.compile("https://preview\.saavncdn\.com/(\d+)/(.+)_96_p.mp4")
 json_rx = re.compile("({.+})")
 
 logo = """
@@ -50,8 +49,9 @@ class Jiosaavn:
         audio["\xa9nam"] = sanitize(unescape(json["song"]))
         audio["\xa9alb"] = sanitize(unescape(json["album"]))
         audio["\xa9ART"] = sanitize(unescape(json["primary_artists"]))
-        audio["\xa9wrt"] = sanitize(unescape(json["music"] ))
-        audio["aART"] = album_artist if album_artist else sanitize(unescape(json["primary_artists"]))
+        audio["\xa9wrt"] = sanitize(unescape(json["music"]))
+        audio["aART"] = album_artist if album_artist else sanitize(
+            unescape(json["primary_artists"]))
         audio["\xa9day"] = json["release_date"]  # json["year"]
         audio["----:TXXX:Record label"] = bytes(json["label"], 'UTF-8')
         audio["cprt"] = json["copyright_text"]
@@ -67,17 +67,19 @@ class Jiosaavn:
 
         # cover artwork tag
         with open(os.path.join(album_path, "cover.jpg"), "rb") as f:
-            audio["covr"] = [MP4Cover(f.read(), imageformat=MP4Cover.FORMAT_JPEG)]
+            audio["covr"] = [
+                MP4Cover(f.read(), imageformat=MP4Cover.FORMAT_JPEG)]
 
-        #featured artists
+        # featured artists
         if len(json['featured_artists']) > 1:
-            audio["----:TXXX:Featured artists"] = bytes(json["featured_artists"], 'UTF-8')
+            audio["----:TXXX:Featured artists"] = bytes(
+                json["featured_artists"], 'UTF-8')
 
-        #singers
+        # singers
         if len(json['singers']) > 1:
             audio["----:TXXX:Singers"] = bytes(json["singers"], 'UTF-8')
 
-        #starring
+        # starring
         if len(json['starring']) > 1:
             audio["----:TXXX:Starring"] = bytes(json["starring"], 'UTF-8')
 
@@ -85,13 +87,12 @@ class Jiosaavn:
 
         audio.save()  # tagging done
 
-
     def processAlbum(self, album_id):
-        
+
         # sanitization
         album_json = self.session.get(album_api.format(album_id)).text
         album_json = json.loads(json_rx.search(album_json).group(1))
-        
+
         album_name = sanitize(unescape(album_json['title']))
         album_artist = album_json['primary_artists']
         total_tracks = len(album_json['songs'])
@@ -109,17 +110,18 @@ class Jiosaavn:
         for song in album_json['songs']:
             song_id = album_song_rx.search(song['perma_url']).group(2)
             self.processTrack(song_id, album_artist, song_pos, total_tracks)
-            song_pos+=1
-    
-    def processTrack(self, song_id, album_artist = None, song_pos = 1, total_tracks = 1, isPlaylist = False):
-        
+            song_pos += 1
+
+    def processTrack(self, song_id, album_artist=None, song_pos=1, total_tracks=1, isPlaylist=False):
+
         metadata = self.session.get(song_api.format(song_id)).text
         metadata = json.loads(json_rx.search(metadata).group(1))
         # print(metadata.keys())
         song_json = metadata[f'{list(metadata.keys())[0]}']
 
         # sanitize
-        primary_artists = album_artist if album_artist else sanitize(unescape(song_json["primary_artists"]))
+        primary_artists = album_artist if album_artist else sanitize(
+            unescape(song_json["primary_artists"]))
         track_name = sanitize(unescape(song_json['song']))
         album = sanitize(unescape(song_json['album']))
         year = str(unescape(song_json['year']))
@@ -130,7 +132,7 @@ class Jiosaavn:
         else:
             folder_name = f"{primary_artists if primary_artists.count(',') < 2 else 'Various Artists'} - {album} [{year}]"
         song_name = f"{str(song_pos).zfill(2)}. {track_name}.m4a"
-        
+
         album_path = os.path.join("Downloads", folder_name)
         song_path = os.path.join("Downloads", folder_name, song_name)
 
@@ -163,8 +165,7 @@ class Jiosaavn:
 
             # checking if the song is available in the region, if yes then proceed to download else prompt the unavailability
             if 'media_preview_url' in song_json:
-                threeDigits, cdnTrackid = cdn_track_tx.search(song_json['media_preview_url']).groups()
-                cdnURL = f"https://aac.saavncdn.com/{threeDigits}/{cdnTrackid}_320.mp4"
+                cdnURL = self.getCdnURL(song_json["encrypted_media_url"])
 
                 # download the song
                 with open(song_path, "wb") as f:
@@ -172,31 +173,47 @@ class Jiosaavn:
 
                 print("Tagging metadata...")
 
-                self.tagger(song_json, song_path, album_artist ,album_path, song_pos, total_tracks)
+                self.tagger(song_json, song_path, album_artist,
+                            album_path, song_pos, total_tracks)
                 print("Done.")
             else:
                 print("\nTrack unavailable in your region!")
 
-    def processPlaylist(self, playlist_id):
-        # json
+    def getCdnURL(self, encurl: str):
+        params = {
+            '__call': 'song.generateAuthToken',
+            'url': encurl,
+            'bitrate': '320',
+            'api_version': '4',
+            '_format': 'json',
+            'ctx': 'web6dot0',
+            '_marker': '0',
+        }
+        response = self.session.get('https://www.jiosaavn.com/api.php', params=params)
+        return response.json()["auth_url"]
 
-        playlist_json = self.session.get(playlist_api.format(playlist_id)).text
-        playlist_json = json.loads(json_rx.search(playlist_json).group(1))
 
-        playlist_name = playlist_json['listname']
-        total_tracks = int(playlist_json['list_count'])
-        playlist_path = f"Playlist - {playlist_name}"
-        playlist_info = f"\n\
+def processPlaylist(self, playlist_id):
+    # json
+
+    playlist_json = self.session.get(playlist_api.format(playlist_id)).text
+    playlist_json = json.loads(json_rx.search(playlist_json).group(1))
+
+    playlist_name = playlist_json['listname']
+    total_tracks = int(playlist_json['list_count'])
+    playlist_path = f"Playlist - {playlist_name}"
+    playlist_info = f"\n\
                         Playlist info:\n\
                         Playlist name    : {playlist_name}\n\
                         Number of tracks : {total_tracks}\n"
-        print(playlist_info)
-        
-        song_pos = 1
-        for song in playlist_json['songs']:
-            song_id = album_song_rx.search(song['perma_url']).group(2)
-            self.processTrack(song_id, None, song_pos, total_tracks, playlist_path)
-            song_pos+=1
+    print(playlist_info)
+
+    song_pos = 1
+    for song in playlist_json['songs']:
+        song_id = album_song_rx.search(song['perma_url']).group(2)
+        self.processTrack(song_id, None, song_pos,
+                          total_tracks, playlist_path)
+        song_pos += 1
 
 
 if __name__ == "__main__":
