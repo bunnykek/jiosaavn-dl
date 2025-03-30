@@ -13,7 +13,7 @@ from mutagen.mp4 import MP4, MP4Cover
 
 song_api = "https://www.jiosaavn.com/api.php?__call=webapi.get&token={}&type=song"
 album_api = "https://www.jiosaavn.com/api.php?__call=webapi.get&token={}&type=album"
-playlist_api = "https://www.jiosaavn.com/api.php?__call=webapi.get&token={}&type=playlist&_format=json"
+playlist_api = "https://www.jiosaavn.com/api.php?__call=webapi.get&token={}&type=playlist&_format=json&n=1000"
 lyrics_api = "https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&ctx=web6dot0&api_version=4&_format=json&_marker=0%3F_marker%3D0&lyrics_id="
 album_song_rx = re.compile("https://www\.jiosaavn\.com/(album|song)/.+?/(.+)")
 playlist_rx = re.compile("https://www\.jiosaavn\.com/s/playlist/.+/(.+)")
@@ -193,27 +193,27 @@ class Jiosaavn:
         return response.json()["auth_url"]
 
 
-def processPlaylist(self, playlist_id):
-    # json
+    def processPlaylist(self, playlist_id):
+        # json
 
-    playlist_json = self.session.get(playlist_api.format(playlist_id)).text
-    playlist_json = json.loads(json_rx.search(playlist_json).group(1))
+        playlist_json = self.session.get(playlist_api.format(playlist_id)).text
+        playlist_json = json.loads(json_rx.search(playlist_json).group(1))
+        print(json.dumps(playlist_json, indent=4))
+        playlist_name = playlist_json['listname']
+        total_tracks = int(playlist_json['list_count'])
+        playlist_path = f"Playlist - {playlist_name}"
+        playlist_info = f"\n\
+                            Playlist info:\n\
+                            Playlist name    : {playlist_name}\n\
+                            Number of tracks : {total_tracks}\n"
+        print(playlist_info)
 
-    playlist_name = playlist_json['listname']
-    total_tracks = int(playlist_json['list_count'])
-    playlist_path = f"Playlist - {playlist_name}"
-    playlist_info = f"\n\
-                        Playlist info:\n\
-                        Playlist name    : {playlist_name}\n\
-                        Number of tracks : {total_tracks}\n"
-    print(playlist_info)
-
-    song_pos = 1
-    for song in playlist_json['songs']:
-        song_id = album_song_rx.search(song['perma_url']).group(2)
-        self.processTrack(song_id, None, song_pos,
-                          total_tracks, playlist_path)
-        song_pos += 1
+        song_pos = 1
+        for song in playlist_json['songs']:
+            song_id = album_song_rx.search(song['perma_url']).group(2)
+            self.processTrack(song_id, None, song_pos,
+                            total_tracks, playlist_path)
+            song_pos += 1
 
 
 if __name__ == "__main__":
