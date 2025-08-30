@@ -166,6 +166,7 @@ class Jiosaavn:
             # checking if the song is available in the region, if yes then proceed to download else prompt the unavailability
             if 'media_preview_url' in song_json:
                 cdnURL = self.getCdnURL(song_json["encrypted_media_url"])
+                # fix cdn url 
                 cdnURL = re.sub('web','aac',cdnURL)
                 # download the song
                 with open(song_path, "wb") as f:
@@ -243,5 +244,6 @@ if __name__ == "__main__":
         jiosaavn.processPlaylist(playlist_id)
     else:
         print("Please enter a valid link!")
+
 
 
