@@ -1,5 +1,5 @@
 # jiosaavn-dl
-# made by bunny
+# made by bunnykek
 
 import json
 import requests
@@ -16,7 +16,7 @@ album_api = "https://www.jiosaavn.com/api.php?__call=webapi.get&token={}&type=al
 playlist_api = "https://www.jiosaavn.com/api.php?__call=webapi.get&token={}&type=playlist&_format=json&n=1000"
 lyrics_api = "https://www.jiosaavn.com/api.php?__call=lyrics.getLyrics&ctx=web6dot0&api_version=4&_format=json&_marker=0%3F_marker%3D0&lyrics_id="
 album_song_rx = re.compile("https://www\.jiosaavn\.com/(album|song)/.+?/(.+)")
-playlist_rx = re.compile("https://www\.jiosaavn\.com/s/playlist/.+/(.+)")
+playlist_rx = re.compile("https://www\.jiosaavn\.com/(s/playlist|featured)/.+/(.+)")
 json_rx = re.compile("({.+})")
 
 logo = """
@@ -29,7 +29,7 @@ logo = """
       | $$| $$|  $$$$$$/|  $$$$$$/|  $$$$$$$|  $$$$$$$   \  $/   | $$  | $$        |  $$$$$$$| $$
       | $$|__/ \______/  \______/  \_______/ \_______/    \_/    |__/  |__/         \_______/|__/
  /$$  | $$                                                                                       
-|  $$$$$$/                                                                             --by bunny
+|  $$$$$$/                                                                             --by @bunnykek
  \______/                                                                                        
 """
 
@@ -165,9 +165,9 @@ class Jiosaavn:
 
             # checking if the song is available in the region, if yes then proceed to download else prompt the unavailability
             if 'media_preview_url' in song_json:
-                cdnURL = self.getCdnURL(song_json["encrypted_media_url"])
+                cdnURL: str = self.getCdnURL(song_json["encrypted_media_url"])
                 # fix cdn url 
-                cdnURL = re.sub('web','aac',cdnURL)
+                cdnURL = cdnURL.replace('web','aac', 1)
                 # download the song
                 with open(song_path, "wb") as f:
                     f.write(self.session.get(cdnURL).content)
@@ -199,7 +199,7 @@ class Jiosaavn:
 
         playlist_json = self.session.get(playlist_api.format(playlist_id)).text
         playlist_json = json.loads(json_rx.search(playlist_json).group(1))
-        print(json.dumps(playlist_json, indent=4))
+        # print(json.dumps(playlist_json, indent=4))
         playlist_name = playlist_json['listname']
         total_tracks = int(playlist_json['list_count'])
         playlist_path = f"Playlist - {playlist_name}"
@@ -239,8 +239,8 @@ if __name__ == "__main__":
             jiosaavn.processTrack(id_, None, 1, 1)
         elif kind == 'album':
             jiosaavn.processAlbum(id_)
-    elif '/playlist/' in url:
-        playlist_id = playlist_rx.search(url).group(1)
+    elif '/playlist/' in url or '/featured/' in url:
+        playlist_id = playlist_rx.search(url).group(2)
         jiosaavn.processPlaylist(playlist_id)
     else:
         print("Please enter a valid link!")
