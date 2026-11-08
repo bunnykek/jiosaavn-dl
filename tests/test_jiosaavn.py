@@ -141,6 +141,7 @@ class ClientTests(unittest.TestCase):
         self.prepare_track()
         self.client.processTrack('token')
         path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.name, 'An Album - Artist [2024]')
         tags = MP4(path)
         self.assertEqual(tags['\xa9nam'], ['A: Song & More'])
         self.assertEqual(tags['trkn'], [(1, 1)])

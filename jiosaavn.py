@@ -295,7 +295,7 @@ class Jiosaavn:
             folder = safe_name(isPlaylist)
         else:
             artist = "Various Artists" if artists.count(",") >= 2 else artists
-            folder = safe_name(f"{artist} - {clean_text(song.get('album')) or 'Unknown Album'} [{song.get('year') or 'Unknown'}]")
+            folder = safe_name(f"{clean_text(song.get('album')) or 'Unknown Album'} - {artist} [{song.get('year') or 'Unknown'}]")
         directory = self.output / folder
         destination = directory / f"{song_pos:02d}. {safe_name(title)}.m4a"
         print(f"[{song_pos}/{total_tracks}] {title} — {artists}", flush=True)
