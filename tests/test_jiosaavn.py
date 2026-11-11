@@ -40,10 +40,17 @@ class UrlTests(unittest.TestCase):
             ('s/song/hindi/name/token', 'song'),
             ('p/album/hindi/name/token', 'album'), ('p/song/hindi/name/token', 'song'),
             ('p/playlist/user/name/token', 'playlist'),
+            ('s/featured/hindi/name/token', 'playlist'), ('p/featured/hindi/name/token', 'playlist'),
         ):
             with self.subTest(path=path):
                 self.assertEqual(app.parse_url(f'https://www.jiosaavn.com/{path}/?source=share#x'),
                                  (expected, 'token'))
+
+    def test_legacy_saavn_featured_link_with_underscore_token(self):
+        self.assertEqual(
+            app.parse_url('https://www.saavn.com/s/featured/hindi/apne-desi-gaane-carvaan-select/'
+                          'r7OrmfAcC4JTHgJw1pi47A__'),
+            ('playlist', 'r7OrmfAcC4JTHgJw1pi47A__'))
 
     def test_mobile_legacy_and_schemeless_links(self):
         for host in app.SITE_HOSTS:
