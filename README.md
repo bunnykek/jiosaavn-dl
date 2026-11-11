@@ -83,9 +83,9 @@ Replace `URL`, `URL_1`, and `URL_2` with actual JioSaavn links. You can mix song
 
 Supported link forms include:
 
-- Individual songs: `/song/NAME/TOKEN` and older `/s/song/LANGUAGE/NAME/TOKEN` links.
-- Albums: `/album/NAME/TOKEN` and older `/s/album/LANGUAGE/NAME/TOKEN` links.
-- Playlists: `/s/playlist/USER/NAME/TOKEN`, `/playlist/NAME/TOKEN`, and featured lists at `/featured/NAME/TOKEN`.
+- Individual songs: `/song/NAME/TOKEN`, older `/s/song/LANGUAGE/NAME/TOKEN` links, and `/p/song/LANGUAGE/NAME/TOKEN` links.
+- Albums: `/album/NAME/TOKEN`, older `/s/album/LANGUAGE/NAME/TOKEN` links, and `/p/album/LANGUAGE/NAME/TOKEN` links.
+- Playlists: `/s/playlist/USER/NAME/TOKEN`, `/p/playlist/USER/NAME/TOKEN`, `/playlist/NAME/TOKEN`, and featured lists at `/featured/NAME/TOKEN`.
 - Desktop and mobile JioSaavn hosts, older `saavn.com` hosts, HTTP/HTTPS, and links pasted without `https://`.
 - Shared links with query parameters, fragments, or trailing slashes.
 - `saavn.app.link` and `jiosaavn.app.link` share links that redirect to a supported website URL. If a link only opens an app or landing page, copy the full song/album/playlist URL from the website instead.

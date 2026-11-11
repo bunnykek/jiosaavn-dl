@@ -38,6 +38,8 @@ class UrlTests(unittest.TestCase):
             ('featured/name/token', 'playlist'), ('s/playlist/user/name/token', 'playlist'),
             ('playlist/name/token', 'playlist'), ('s/album/hindi/name/token', 'album'),
             ('s/song/hindi/name/token', 'song'),
+            ('p/album/hindi/name/token', 'album'), ('p/song/hindi/name/token', 'song'),
+            ('p/playlist/user/name/token', 'playlist'),
         ):
             with self.subTest(path=path):
                 self.assertEqual(app.parse_url(f'https://www.jiosaavn.com/{path}/?source=share#x'),

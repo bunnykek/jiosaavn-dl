@@ -105,7 +105,7 @@ def parse_url(url):
     segments = parts.path.strip("/").split("/")
     if len(segments) >= 3 and segments[0] in ("song", "album", "playlist", "featured"):
         kind = "playlist" if segments[0] == "featured" else segments[0]
-    elif len(segments) >= 4 and segments[0] == "s" and segments[1] in ("song", "album", "playlist"):
+    elif len(segments) >= 4 and segments[0] in ("s", "p") and segments[1] in ("song", "album", "playlist"):
         kind = segments[1]
     else:
         raise DownloadError("Unsupported URL. Expected a song, album, or playlist link.")
