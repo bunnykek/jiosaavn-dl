@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import requests
 from mutagen.mp4 import MP4
@@ -156,6 +156,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(tags['\xa9nam'], ['A: Song & More'])
         self.assertEqual(tags['trkn'], [(1, 1)])
         self.assertEqual(tags['rtng'], [2])
+        self.assertEqual(tags['----:com.apple.iTunes:JioSaavn ID'], [b'123'])
         self.assertEqual(self.client.downloaded, 1)
         self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
 
@@ -165,6 +166,32 @@ class ClientTests(unittest.TestCase):
         self.client.processTrack('token')
         self.assertEqual(self.client.skipped, 1)
         self.assertEqual(self.session.get.call_count, 1)
+
+    def test_skip_tagged_track_after_position_changes(self):
+        self.prepare_track()
+        self.client.processTrack('token', song_pos=1)
+        self.client.processTrack('token', song_pos=2)
+        self.assertEqual(self.client.skipped, 1)
+        self.assertEqual(self.session.get.call_count, 1)
+
+    def test_collection_track_metadata_avoids_song_lookup(self):
+        self.prepare_track()
+        collection_song = dict(SONG, perma_url=URL)
+        self.client.metadata.return_value = {
+            'title': 'My Album',
+            'songs': [collection_song],
+        }
+        self.client.process_collection('album', 'collection-token')
+        self.assertEqual(self.client.metadata.call_count, 1)
+        self.assertEqual(self.client.downloaded, 1)
+
+    def test_many_artists_are_not_guessed_to_be_various_artists(self):
+        self.prepare_track()
+        song = dict(SONG, primary_artists='Artist One, Artist Two, Artist Three')
+        self.client.processTrack('token', song_data=song)
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.name,
+                         'An Album - Artist One, Artist Two, Artist Three [2024]')
 
     def test_current_song_list_response(self):
         self.prepare_track()
@@ -200,26 +227,77 @@ class ClientTests(unittest.TestCase):
         self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
 
     def test_truncated_and_empty_downloads(self):
-        for content, headers in ((b'a', {'Content-Length': '5'}), (b'', {}),
-                                 (b'error', {'Content-Type': 'text/html'})):
+        for content, headers in ((b'', {}), (b'error', {'Content-Type': 'text/html'})):
             self.session.get.return_value = response(content, headers=headers)
             with self.subTest(content=content), self.assertRaises(app.DownloadError):
                 self.client.download_file('https://example.com/audio', Path(self.temp.name) / 'track.m4a')
             self.assertFalse(list(Path(self.temp.name).iterdir()))
+        path = Path(self.temp.name) / 'track.m4a'
+        self.session.get.return_value = response(b'a', headers={'Content-Length': '5'})
+        with self.assertRaises(app.DownloadError):
+            self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(path.with_name(path.name + '.part').read_bytes(), b'a')
 
-    def test_interrupted_stream_cleans_temp(self):
+    def test_interrupted_stream_preserves_partial_file(self):
         self.session.get.return_value = response()
-        self.session.get.return_value.iter_content.side_effect = requests.ConnectionError('lost connection')
+
+        def interrupted():
+            yield b'partial'
+            raise requests.ConnectionError('lost connection')
+
+        self.session.get.return_value.iter_content.return_value = interrupted()
         with self.assertRaises(app.DownloadError):
             self.client.download_file('https://example.com/audio', Path(self.temp.name) / 'track.m4a')
-        self.assertFalse(list(Path(self.temp.name).iterdir()))
+        self.assertEqual(
+            (Path(self.temp.name) / 'track.m4a.part').read_bytes(), b'partial')
 
-    def test_keyboard_interrupt_cleans_temp(self):
+    def test_keyboard_interrupt_preserves_partial_file(self):
         self.session.get.return_value = response()
-        self.session.get.return_value.iter_content.side_effect = KeyboardInterrupt
+
+        def interrupted():
+            yield b'partial'
+            raise KeyboardInterrupt
+
+        self.session.get.return_value.iter_content.return_value = interrupted()
         with self.assertRaises(KeyboardInterrupt):
             self.client.download_file('https://example.com/audio', Path(self.temp.name) / 'track.m4a')
-        self.assertFalse(list(Path(self.temp.name).iterdir()))
+        self.assertEqual(
+            (Path(self.temp.name) / 'track.m4a.part').read_bytes(), b'partial')
+
+    def test_resume_partial_download_with_range_request(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        path.with_name(path.name + '.part').write_bytes(b'abc')
+        result = response(b'defghij', headers={
+            'Content-Length': '7',
+            'Content-Range': 'bytes 3-9/10',
+        })
+        result.status_code = 206
+        self.session.get.return_value = result
+        temp = self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(temp.read_bytes(), b'abcdefghij')
+        self.assertEqual(self.session.get.call_args.kwargs['headers'], {
+            'Range': 'bytes=3-', 'Accept-Encoding': 'identity',
+        })
+
+    def test_invalid_range_response_discards_partial_file(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        partial = path.with_name(path.name + '.part')
+        partial.write_bytes(b'abc')
+        result = response(b'data', headers={'Content-Range': 'bytes 0-3/7'})
+        result.status_code = 206
+        self.session.get.return_value = result
+        with self.assertRaises(app.DownloadError):
+            self.client.download_file('https://example.com/audio', path)
+        self.assertFalse(partial.exists())
+
+    def test_resume_restarts_when_server_ignores_range(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        path.with_name(path.name + '.part').write_bytes(b'old partial')
+        result = response(b'complete', headers={'Content-Length': '8'})
+        result.status_code = 200
+        self.session.get.return_value = result
+        temp = self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(temp.read_bytes(), b'complete')
 
     def test_optional_lyrics_failure_keeps_track(self):
         self.prepare_track()
@@ -259,7 +337,7 @@ class ClientTests(unittest.TestCase):
         worker_threads = set()
         worker_sessions = []
 
-        def process_track(*args):
+        def process_track(*args, **kwargs):
             worker_threads.add(threading.current_thread().ident)
             barrier.wait()
             self.client._increment_counter('downloaded')
@@ -277,6 +355,29 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.downloaded, 4)
         self.assertEqual(len(worker_sessions), 4)
         self.assertTrue(all(session.close.called for session in worker_sessions))
+
+    def test_collection_fetches_all_playlist_pages(self):
+        pages = {
+            None: {
+                'listname': 'Long Playlist',
+                'list_count': 5,
+                'songs': [{'id': f'song-{index}', 'perma_url': URL} for index in range(2)],
+            },
+            2: {'songs': [{'id': f'song-{index}', 'perma_url': URL} for index in range(2, 4)]},
+            3: {'songs': [{'id': 'song-4', 'perma_url': URL}]},
+        }
+        self.client.metadata = Mock(side_effect=lambda kind, token, page=None: pages[page])
+        self.client.processTrack = Mock()
+        self.client.process_collection('playlist', 'playlist-token')
+        self.assertEqual(self.client.processTrack.call_count, 5)
+        self.assertEqual(
+            {call.kwargs['song_data']['id'] for call in self.client.processTrack.call_args_list},
+            {f'song-{index}' for index in range(5)})
+        self.assertEqual(
+            self.client.metadata.call_args_list,
+            [call('playlist', 'playlist-token'),
+             call('playlist', 'playlist-token', page=2),
+             call('playlist', 'playlist-token', page=3)])
 
     def test_album_and_playlist_download_all_tracks(self):
         self.prepare_track()

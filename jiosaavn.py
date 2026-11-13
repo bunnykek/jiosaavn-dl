@@ -21,6 +21,7 @@ from mutagen import MutagenError
 from mutagen.mp4 import MP4, MP4Cover
 
 API_URL = "https://www.jiosaavn.com/api.php"
+COLLECTION_PAGE_SIZE = 1000
 COLLECTION_WORKERS = 4
 __version__ = "0.3.0"
 SITE_HOSTS = frozenset(("jiosaavn.com", "www.jiosaavn.com", "m.jiosaavn.com",
@@ -230,8 +231,11 @@ class Jiosaavn:
             raise DownloadError(f"JioSaavn: {data['error']}")
         return data
 
-    def metadata(self, kind, token):
-        return self.api("webapi.get", token=token, type=kind, n=1000)
+    def metadata(self, kind, token, page=None):
+        params = {"token": token, "type": kind, "n": COLLECTION_PAGE_SIZE}
+        if page is not None:
+            params["p"] = page
+        return self.api("webapi.get", **params)
 
     def getCdnURL(self, encurl):
         data = self.api("song.generateAuthToken", url=encurl,
@@ -245,34 +249,58 @@ class Jiosaavn:
         return parts._replace(netloc=host).geturl()
 
     def download_file(self, url, path):
-        """Stream to a temporary file; leave the destination intact on failure."""
+        """Resume a partial stream into a temporary file."""
         temp = path.with_name(path.name + ".part")
+        offset = temp.stat().st_size if temp.exists() else 0
+        request_options = {"stream": True}
+        if offset:
+            request_options["headers"] = {
+                "Range": f"bytes={offset}-",
+                "Accept-Encoding": "identity",
+            }
         try:
-            with self.request(url, stream=True) as response:
+            with self.request(url, **request_options) as response:
                 content_type = response.headers.get("Content-Type", "").lower()
                 if "text/" in content_type or "json" in content_type:
                     raise DownloadError("The server returned an error page instead of media.")
+                append = offset > 0 and response.status_code == 206
+                expected_total = None
+                if append:
+                    content_range = response.headers.get("Content-Range", "")
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
+                    if not match or int(match.group(1)) != offset or int(match.group(2)) < offset:
+                        temp.unlink(missing_ok=True)
+                        raise DownloadError("The server returned an invalid range response.")
+                    if match.group(3) != "*":
+                        expected_total = int(match.group(3))
+                        if int(match.group(2)) >= expected_total:
+                            temp.unlink(missing_ok=True)
+                            raise DownloadError("The server returned an invalid range response.")
+                    if response.headers.get("Content-Encoding", "").lower() not in ("", "identity"):
+                        temp.unlink(missing_ok=True)
+                        raise DownloadError("The server encoded a ranged response; retry without resuming.")
                 size = 0
-                with temp.open("wb") as handle:
+                with temp.open("ab" if append else "wb") as handle:
                     for chunk in response.iter_content(chunk_size=128 * 1024):
                         if chunk:
                             handle.write(chunk)
                             size += len(chunk)
                 if not size:
+                    if not offset:
+                        temp.unlink(missing_ok=True)
                     raise DownloadError("The server returned an empty file.")
                 expected = response.headers.get("Content-Length")
                 if expected and expected.isdigit() and not response.headers.get("Content-Encoding"):
                     if size != int(expected):
                         raise DownloadError("Download was incomplete. Please retry.")
+                if expected_total is not None and temp.stat().st_size != expected_total:
+                    raise DownloadError("Download was incomplete. Please retry.")
             return temp
         except requests.RequestException as exc:
-            temp.unlink(missing_ok=True)
             raise DownloadError(f"Download interrupted: {exc}") from exc
-        except BaseException:
-            temp.unlink(missing_ok=True)
-            raise
 
-    def tagger(self, song, song_path, album_artist=None, pos=1, total=1, artwork=None):
+    def tagger(self, song, song_path, album_artist=None, pos=1, total=1, artwork=None,
+               song_id=None):
         audio = MP4(song_path)
         for atom, key in (("\xa9nam", "song"), ("\xa9alb", "album"),
                           ("\xa9ART", "primary_artists"), ("\xa9wrt", "music"),
@@ -283,6 +311,9 @@ class Jiosaavn:
         audio["aART"] = clean_text(album_artist or song.get("primary_artists"))
         audio["trkn"] = [(pos, total)]
         audio["rtng"] = [4 if is_true(song.get("explicit_content")) else 2]
+        track_id = song.get("id") or song_id
+        if track_id:
+            audio["----:com.apple.iTunes:JioSaavn ID"] = clean_text(track_id).encode("utf-8")
         for label, key in (("Record label", "label"), ("Language", "language"),
                            ("Featured artists", "featured_artists"),
                            ("Singers", "singers"), ("Starring", "starring")):
@@ -302,17 +333,62 @@ class Jiosaavn:
         audio.pop("\xa9too", None)
         audio.save()
 
+    @staticmethod
+    def _tagged_song_id(path):
+        try:
+            tags = MP4(path).get("----:com.apple.iTunes:JioSaavn ID")
+        except (MutagenError, OSError, ValueError):
+            return None
+        if not tags:
+            return None
+        try:
+            return tags[0].decode("utf-8").strip()
+        except (AttributeError, UnicodeDecodeError):
+            return None
+
+    def _existing_destination(self, directory, destination, track_id):
+        conflict = False
+        if not directory.is_dir():
+            return destination, False
+        for existing in directory.glob("*.m4a"):
+            existing_id = self._tagged_song_id(existing)
+            if existing_id == track_id:
+                return existing, True
+            if existing == destination and existing_id is not None:
+                conflict = True
+            elif existing == destination and existing.stat().st_size:
+                try:
+                    MP4(existing)
+                except (MutagenError, OSError, ValueError):
+                    continue
+                return existing, True
+        if not conflict:
+            return destination, False
+        stem = f"{destination.stem} [{safe_name(track_id)}]"
+        candidate = destination.with_name(stem + destination.suffix)
+        suffix = 2
+        while candidate.exists():
+            if self._tagged_song_id(candidate) == track_id:
+                return candidate, True
+            candidate = destination.with_name(f"{stem} ({suffix}){destination.suffix}")
+            suffix += 1
+        return candidate, False
+
     def processTrack(self, song_id, album_artist=None, song_pos=1, total_tracks=1,
-                     isPlaylist=False):
-        metadata = self.metadata("song", song_id)
-        if "song" in metadata:
-            song = metadata
+                     isPlaylist=False, song_data=None):
+        if (isinstance(song_data, dict) and "song" in song_data
+                and "encrypted_media_url" in song_data):
+            song = song_data
         else:
-            candidates = metadata.get("songs")
-            if not isinstance(candidates, list):
-                candidates = metadata.values()
-            song = next((value for value in candidates
-                         if isinstance(value, dict) and "song" in value), None)
+            metadata = self.metadata("song", song_id)
+            if "song" in metadata:
+                song = metadata
+            else:
+                candidates = metadata.get("songs")
+                if not isinstance(candidates, list):
+                    candidates = metadata.values()
+                song = next((value for value in candidates
+                             if isinstance(value, dict) and "song" in value), None)
         if song is None:
             raise DownloadError("Track metadata is missing or has an unsupported format.")
         title = clean_text(song.get("song")) or song_id
@@ -320,19 +396,16 @@ class Jiosaavn:
         if isPlaylist:
             folder = safe_name(isPlaylist)
         else:
-            artist = "Various Artists" if artists.count(",") >= 2 else artists
-            folder = safe_name(f"{clean_text(song.get('album')) or 'Unknown Album'} - {artist} [{song.get('year') or 'Unknown'}]")
+            folder = safe_name(f"{clean_text(song.get('album')) or 'Unknown Album'} - {artists} [{song.get('year') or 'Unknown'}]")
         directory = self.output / folder
         destination = directory / f"{song_pos:02d}. {safe_name(title)}.m4a"
         print(f"[{song_pos}/{total_tracks}] {title} — {artists}", flush=True)
-        if destination.exists() and destination.stat().st_size and not self.overwrite:
-            try:
-                MP4(destination)
-            except (MutagenError, ValueError):
-                print("  Existing file is invalid; downloading again.")
-            else:
+        track_id = clean_text(song.get("id") or song_id)
+        if not self.overwrite:
+            destination, found = self._existing_destination(directory, destination, track_id)
+            if found:
                 self._increment_counter("skipped")
-                print("  Skipped (already exists; use --overwrite to replace).")
+                print("  Skipped (song ID already exists; use --overwrite to replace).")
                 return
         encrypted = song.get("encrypted_media_url")
         if not encrypted:
@@ -352,7 +425,8 @@ class Jiosaavn:
                 print(f"  Warning: cover unavailable: {exc}", file=sys.stderr)
         temp = self.download_file(audio_url, destination)
         try:
-            self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork)
+            self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork,
+                        song_id=song_id)
             temp.replace(destination)
         finally:
             temp.unlink(missing_ok=True)
@@ -373,7 +447,8 @@ class Jiosaavn:
                     self._worker_sessions.append(worker_session)
             self.processTrack(track_token,
                               data.get("primary_artists") if kind == "album" else None,
-                              pos, total, f"Playlist - {name}" if kind == "playlist" else False)
+                              pos, total, f"Playlist - {name}" if kind == "playlist" else False,
+                              song_data=song)
         except (DownloadError, OSError, MutagenError, ValueError, TypeError, KeyError) as exc:
             self._increment_counter("failed")
             print(f"  Error on track {pos}: {exc}", file=sys.stderr)
@@ -384,11 +459,36 @@ class Jiosaavn:
         if not isinstance(songs, list) or not songs:
             raise DownloadError("This collection has no available tracks.")
         name = clean_text(data.get("title") or data.get("listname")) or "Untitled"
-        print(f"{kind.title()}: {name} ({len(songs)} tracks)")
         try:
             reported_total = int(data.get("list_count", len(songs)))
         except (ValueError, TypeError):
             reported_total = len(songs)
+        if kind == "playlist" and reported_total > len(songs):
+            page_size = len(songs)
+            max_pages = (reported_total + page_size - 1) // page_size
+
+            def page_signature(items):
+                return tuple(
+                    (item.get("id") or item.get("perma_url") or repr(item))
+                    if isinstance(item, dict) else repr(item)
+                    for item in items)
+
+            page_signatures = {
+                page_signature(songs)
+            }
+            for page in range(2, max_pages + 1):
+                page_data = self.metadata(kind, token, page=page)
+                page_songs = page_data.get("songs")
+                if not isinstance(page_songs, list) or not page_songs:
+                    break
+                signature = page_signature(page_songs)
+                if signature in page_signatures:
+                    break
+                page_signatures.add(signature)
+                songs.extend(page_songs)
+                if len(songs) >= reported_total:
+                    break
+        print(f"{kind.title()}: {name} ({len(songs)} tracks)")
         if reported_total > len(songs):
             print(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.", file=sys.stderr)
         try:

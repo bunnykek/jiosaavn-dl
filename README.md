@@ -117,18 +117,18 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 
 The service determines which quality is available. Files keep their original AAC audio; the program does not transcode them.
 
-Album tracks are stored in `ALBUM - ARTIST [YEAR]` folders, and playlists in `Playlist - NAME` folders. Tracks are numbered in collection order. Filenames are sanitized for portability; metadata keeps the original punctuation.
-Collection tracks download concurrently, with up to four tracks in progress at once.
+Album tracks are stored in `ALBUM - ARTIST [YEAR]` folders, and playlists in `Playlist - NAME` folders. Tracks are numbered in collection order. Filenames are sanitized for portability; metadata keeps the original punctuation. Album folders use the artist names returned by JioSaavn instead of guessing that several artists mean “Various Artists.”
+Collection tracks download concurrently, with up to four tracks in progress at once. Playlist pages are fetched when the collection exceeds 1,000 tracks, and track metadata included in those pages is reused.
 
 ## Reliability and troubleshooting
 
-- Completed, readable M4A files are skipped by default. Use `--overwrite` to refresh their audio or metadata. Empty or invalid existing files are downloaded again.
-- Audio streams into a `.part` file and moves into place only after tagging succeeds. Failed downloads do not replace an existing track. Interrupted temporary files are cleaned up when possible; after a force quit, rerun the same command to retry unfinished tracks.
+- Completed, readable M4A files are skipped by default. The JioSaavn song ID is stored in each downloaded file and used to recognize tracks after playlist reordering. Use `--overwrite` to refresh their audio or metadata. Empty or invalid existing files are downloaded again.
+- Audio streams into a `.part` file and moves into place only after tagging succeeds. Interrupted downloads keep their partial data and resume with an HTTP range request when supported; if the server ignores the range, the file restarts from the beginning. Failed downloads do not replace an existing track.
 - Transient HTTP errors are retried up to three times. Increase `--timeout` for slow connections.
 - Missing optional metadata, lyrics, or artwork does not prevent downloading a track. Artwork is embedded in each track rather than saved as a separate cover file.
 - A failed track does not stop the rest of an album, playlist, or batch. The final summary counts downloaded, skipped, and failed items. Rerun the command to retry failures.
 - Exit codes: `0` for success (including skipped files), `1` if any item failed, `2` for invalid CLI arguments, and `130` when interrupted with Ctrl+C.
-- The playlist request asks for up to 1,000 tracks. If the service reports more tracks than it returns, the CLI prints a warning; it does not paginate larger playlists.
+- Playlist requests are paginated when the service reports more tracks than the first page contains. If the service returns incomplete or repeated pages, the CLI warns about the remaining tracks.
 - Regional restrictions or JioSaavn API changes may make some tracks unavailable. Errors appear in the terminal. If optional lookups fail, try `--no-lyrics --no-cover`.
 
 If the command is not found after a pipx install, run `pipx ensurepath` and reopen your terminal. With a virtual environment, activate it or use the full path to its command. You can also run `python -m jiosaavn` with the Python interpreter where the package is installed.
