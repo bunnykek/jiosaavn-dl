@@ -10,6 +10,7 @@ from unittest.mock import Mock, call, patch
 import requests
 from mutagen.mp4 import MP4
 
+import jiosaavn_core as core
 import jiosaavn as app
 
 FIXTURE = Path(__file__).parent / 'fixtures' / 'silence.m4a'
@@ -447,7 +448,7 @@ class CliTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        patcher = patch.object(app, 'config_path', return_value=Path(folder.name) / 'config.json')
+        patcher = patch.object(core, 'config_path', return_value=Path(folder.name) / 'config.json')
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -494,6 +495,13 @@ class CliTests(unittest.TestCase):
                 app.main(args)
             self.assertEqual(exc.exception.code, 2)
 
+    def test_version_bumped_for_feature_release(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as exc:
+            app.main(['--version'])
+        self.assertEqual(exc.exception.code, 0)
+        self.assertIn('0.4.0', output.getvalue())
+
     def test_dry_run_flag_configures_client(self):
         with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
             client = cls.return_value
@@ -524,7 +532,7 @@ class FolderSettingsTests(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.path = Path(self.folder.name) / 'settings/config.json'
-        patcher = patch.object(app, 'config_path', return_value=self.path)
+        patcher = patch.object(core, 'config_path', return_value=self.path)
         patcher.start()
         self.addCleanup(patcher.stop)
 

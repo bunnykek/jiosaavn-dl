@@ -19,8 +19,8 @@ classifiers = [
 jiosaavn-dl = "jiosaavn:main"
 
 [tool.setuptools]
-py-modules = ["jiosaavn"]
+py-modules = ["jiosaavn", "jiosaavn_core"]
 
 [tool.setuptools.dynamic]
-version = {attr = "jiosaavn.__version__"}
+version = {attr = "jiosaavn_core.__version__"}
 dependencies = {file = ["requirements.txt"]}

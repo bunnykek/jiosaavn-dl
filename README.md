@@ -150,6 +150,8 @@ python -m unittest discover -s tests -v
 
 Build a wheel and source distribution with `python -m pip install build` followed by `python -m build`. Runtime dependencies are maintained in `requirements.txt` and loaded by the package configuration.
 
+The reusable API, metadata, download, and tagging implementation lives in `jiosaavn_core.py`; `jiosaavn.py` provides CLI parsing and dispatch. For Python callers, `parse_url(url)` validates and extracts the item kind and token, while `Jiosaavn(output=...)` provides `processTrack(song_id)` and `process_collection(kind, token)` operations with the same download, tagging, and error behavior as the CLI. `config_path()`, `saved_output()`, and `save_output(folder)` expose output-folder settings. GitHub Actions runs the unit suite on Python 3.9, 3.11, and 3.13 for pushes and pull requests.
+
 Tests mock network calls and use a tiny M4A fixture containing generated silence to verify real metadata tagging. They do not require a JioSaavn account or network access. The fixture was created with:
 
 ```sh
