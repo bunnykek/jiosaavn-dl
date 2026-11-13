@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
@@ -19,6 +21,7 @@ from mutagen import MutagenError
 from mutagen.mp4 import MP4, MP4Cover
 
 API_URL = "https://www.jiosaavn.com/api.php"
+COLLECTION_WORKERS = 4
 __version__ = "0.3.0"
 SITE_HOSTS = frozenset(("jiosaavn.com", "www.jiosaavn.com", "m.jiosaavn.com",
                         "saavn.com", "www.saavn.com", "m.saavn.com"))
@@ -164,18 +167,41 @@ class Jiosaavn:
         self.overwrite = overwrite
         self.lyrics = lyrics
         self.cover = cover
-        self.session = session or requests.Session()
-        retries = Retry(total=3, backoff_factor=0.5,
-                        status_forcelist=(429, 500, 502, 503, 504),
-                        allowed_methods=frozenset(("GET",)))
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        self._provided_session = session is not None
+        self.session = session if session is not None else self._new_session()
+        self._worker_local = threading.local()
+        self._worker_sessions = []
+        self._worker_sessions_lock = threading.Lock()
+        self._counter_lock = threading.Lock()
+        if self._provided_session:
+            self._configure_session(self.session)
+
         self.downloaded = 0
         self.skipped = 0
         self.failed = 0
 
+    @staticmethod
+    def _configure_session(session):
+        retries = Retry(total=3, backoff_factor=0.5,
+                        status_forcelist=(429, 500, 502, 503, 504),
+                        allowed_methods=frozenset(("GET",)))
+        session.mount("https://", HTTPAdapter(max_retries=retries))
+
+    def _new_session(self):
+        session = requests.Session()
+        self._configure_session(session)
+        return session
+
+    def _increment_counter(self, name):
+        with self._counter_lock:
+            setattr(self, name, getattr(self, name) + 1)
+
+    def _request_session(self):
+        return getattr(self._worker_local, "session", self.session)
+
     def request(self, url, **kwargs):
         try:
-            response = self.session.get(url, timeout=self.timeout, **kwargs)
+            response = self._request_session().get(url, timeout=self.timeout, **kwargs)
             response.raise_for_status()
             return response
         except requests.RequestException as exc:
@@ -305,7 +331,7 @@ class Jiosaavn:
             except (MutagenError, ValueError):
                 print("  Existing file is invalid; downloading again.")
             else:
-                self.skipped += 1
+                self._increment_counter("skipped")
                 print("  Skipped (already exists; use --overwrite to replace).")
                 return
         encrypted = song.get("encrypted_media_url")
@@ -330,8 +356,27 @@ class Jiosaavn:
             temp.replace(destination)
         finally:
             temp.unlink(missing_ok=True)
-        self.downloaded += 1
+        self._increment_counter("downloaded")
         print(f"  Saved: {destination}", flush=True)
+
+    def _process_collection_track(self, kind, data, name, pos, total, song):
+        try:
+            if not isinstance(song, dict) or not song.get("perma_url"):
+                raise DownloadError("Track is missing its URL.")
+            track_kind, track_token = parse_url(song["perma_url"])
+            if track_kind != "song":
+                raise DownloadError("Collection item is not a song URL.")
+            if not self._provided_session and not hasattr(self._worker_local, "session"):
+                worker_session = self._new_session()
+                self._worker_local.session = worker_session
+                with self._worker_sessions_lock:
+                    self._worker_sessions.append(worker_session)
+            self.processTrack(track_token,
+                              data.get("primary_artists") if kind == "album" else None,
+                              pos, total, f"Playlist - {name}" if kind == "playlist" else False)
+        except (DownloadError, OSError, MutagenError, ValueError, TypeError, KeyError) as exc:
+            self._increment_counter("failed")
+            print(f"  Error on track {pos}: {exc}", file=sys.stderr)
 
     def process_collection(self, kind, token):
         data = self.metadata(kind, token)
@@ -346,19 +391,17 @@ class Jiosaavn:
             reported_total = len(songs)
         if reported_total > len(songs):
             print(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.", file=sys.stderr)
-        for pos, song in enumerate(songs, 1):
-            try:
-                if not isinstance(song, dict) or not song.get("perma_url"):
-                    raise DownloadError("Track is missing its URL.")
-                track_kind, track_token = parse_url(song["perma_url"])
-                if track_kind != "song":
-                    raise DownloadError("Collection item is not a song URL.")
-                self.processTrack(track_token,
-                                  data.get("primary_artists") if kind == "album" else None,
-                                  pos, len(songs), f"Playlist - {name}" if kind == "playlist" else False)
-            except (DownloadError, OSError, MutagenError, ValueError, TypeError, KeyError) as exc:
-                self.failed += 1
-                print(f"  Error on track {pos}: {exc}", file=sys.stderr)
+        try:
+            with ThreadPoolExecutor(max_workers=min(COLLECTION_WORKERS, len(songs))) as executor:
+                list(executor.map(
+                    lambda item: self._process_collection_track(
+                        kind, data, name, item[0], len(songs), item[1]),
+                    enumerate(songs, 1)))
+        finally:
+            with self._worker_sessions_lock:
+                worker_sessions, self._worker_sessions = self._worker_sessions, []
+            for worker_session in worker_sessions:
+                worker_session.close()
 
     def processAlbum(self, album_id):
         self.process_collection("album", album_id)

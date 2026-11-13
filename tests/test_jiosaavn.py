@@ -3,6 +3,7 @@ import contextlib
 import io
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -246,7 +247,36 @@ class ClientTests(unittest.TestCase):
         self.client.process_collection('playlist', 'token')
         self.assertEqual(self.client.processTrack.call_count, 2)
         self.assertEqual(self.client.failed, 1)
-        self.assertEqual(self.client.processTrack.call_args.args[2:4], (3, 3))
+        positions = {call.args[2:4] for call in self.client.processTrack.call_args_list}
+        self.assertEqual(positions, {(1, 3), (3, 3)})
+
+    def test_collection_downloads_tracks_concurrently(self):
+        self.client.metadata = Mock(return_value={
+            'title': 'My Album',
+            'songs': [{'perma_url': URL} for _ in range(4)],
+        })
+        barrier = threading.Barrier(4, timeout=2)
+        worker_threads = set()
+        worker_sessions = []
+
+        def process_track(*args):
+            worker_threads.add(threading.current_thread().ident)
+            barrier.wait()
+            self.client._increment_counter('downloaded')
+
+        def create_worker_session():
+            worker_session = Mock()
+            worker_sessions.append(worker_session)
+            return worker_session
+
+        self.client._provided_session = False
+        self.client._new_session = Mock(side_effect=create_worker_session)
+        self.client.processTrack = Mock(side_effect=process_track)
+        self.client.process_collection('album', 'token')
+        self.assertEqual(len(worker_threads), 4)
+        self.assertEqual(self.client.downloaded, 4)
+        self.assertEqual(len(worker_sessions), 4)
+        self.assertTrue(all(session.close.called for session in worker_sessions))
 
     def test_album_and_playlist_download_all_tracks(self):
         self.prepare_track()

@@ -118,6 +118,7 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 The service determines which quality is available. Files keep their original AAC audio; the program does not transcode them.
 
 Album tracks are stored in `ALBUM - ARTIST [YEAR]` folders, and playlists in `Playlist - NAME` folders. Tracks are numbered in collection order. Filenames are sanitized for portability; metadata keeps the original punctuation.
+Collection tracks download concurrently, with up to four tracks in progress at once.
 
 ## Reliability and troubleshooting
 
