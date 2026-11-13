@@ -164,6 +164,9 @@ class Jiosaavn:
         self._worker_sessions = []
         self._worker_sessions_lock = threading.Lock()
         self._counter_lock = threading.Lock()
+        # Tagged song IDs per output folder, read once per run (see _folder_index).
+        self._index_lock = threading.Lock()
+        self._folder_ids = {}
         if self._provided_session:
             self._configure_session(self.session)
 
@@ -380,33 +383,60 @@ class Jiosaavn:
         except (AttributeError, UnicodeDecodeError):
             return None
 
+    def _folder_index(self, directory):
+        """Map each .m4a in a folder to its tagged song ID.
+
+        Tags are read once per folder per run instead of once per track, which
+        keeps large playlists from rescanning the whole folder for every track.
+        The caller must hold self._index_lock.
+        """
+        index = self._folder_ids.get(directory)
+        if index is None:
+            index = {path: self._tagged_song_id(path) for path in directory.glob("*.m4a")}
+            self._folder_ids[directory] = index
+        return index
+
+    def _remember_track(self, directory, path, track_id):
+        """Record a track saved during this run in its folder's index."""
+        with self._index_lock:
+            index = self._folder_ids.get(directory)
+            if index is not None:
+                index[path] = track_id
+
     def _existing_destination(self, directory, destination, track_id):
-        conflict = False
         if not directory.is_dir():
             return destination, False
-        for existing in directory.glob("*.m4a"):
-            existing_id = self._tagged_song_id(existing)
-            if existing_id == track_id:
-                return existing, True
-            if existing == destination and existing_id is not None:
-                conflict = True
-            elif existing == destination and existing.stat().st_size:
-                try:
-                    MP4(existing)
-                except (MutagenError, OSError, ValueError):
-                    continue
-                return existing, True
-        if not conflict:
-            return destination, False
-        stem = f"{destination.stem} [{safe_name(track_id)}]"
-        candidate = destination.with_name(stem + destination.suffix)
-        suffix = 2
-        while candidate.exists():
-            if self._tagged_song_id(candidate) == track_id:
-                return candidate, True
-            candidate = destination.with_name(f"{stem} ({suffix}){destination.suffix}")
-            suffix += 1
-        return candidate, False
+        with self._index_lock:
+            index = self._folder_index(directory)
+            for existing, existing_id in index.items():
+                if existing_id == track_id:
+                    return existing, True
+            conflict = False
+            if destination in index:
+                if index[destination] is not None:
+                    conflict = True
+                else:
+                    # An untagged file at the destination counts as a download
+                    # only if it is non-empty and readable.
+                    try:
+                        if destination.stat().st_size:
+                            MP4(destination)
+                            return destination, True
+                    except (MutagenError, OSError, ValueError):
+                        pass
+            if not conflict:
+                return destination, False
+            stem = f"{destination.stem} [{safe_name(track_id)}]"
+            candidate = destination.with_name(stem + destination.suffix)
+            suffix = 2
+            while candidate in index or candidate.exists():
+                candidate_id = (index[candidate] if candidate in index
+                                else self._tagged_song_id(candidate))
+                if candidate_id == track_id:
+                    return candidate, True
+                candidate = destination.with_name(f"{stem} ({suffix}){destination.suffix}")
+                suffix += 1
+            return candidate, False
 
     def processTrack(self, song_id, album_artist=None, song_pos=1, total_tracks=1,
                      isPlaylist=False, song_data=None):
@@ -472,6 +502,7 @@ class Jiosaavn:
             self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork,
                         song_id=song_id)
             temp.replace(destination)
+            self._remember_track(directory, destination, track_id)
         finally:
             temp.unlink(missing_ok=True)
         self._increment_counter("downloaded")

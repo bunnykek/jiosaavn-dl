@@ -225,6 +225,60 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(path.parent.name,
                          'An Album - Artist One, Artist Two, Artist Three [2024]')
 
+    def tagged_folder(self, name, count):
+        """Create a folder of valid tracks tagged with song IDs id0, id1, ..."""
+        folder = Path(self.temp.name) / name
+        folder.mkdir()
+        for number in range(count):
+            path = folder / f'{number + 1:02d}. Song {number}.m4a'
+            path.write_bytes(FIXTURE.read_bytes())
+            tags = MP4(path)
+            tags['----:com.apple.iTunes:JioSaavn ID'] = [f'id{number}'.encode()]
+            tags.save()
+        return folder
+
+    def count_tag_reads(self):
+        reads = []
+        original = self.client._tagged_song_id
+
+        def counting(path):
+            reads.append(path)
+            return original(path)
+
+        self.client._tagged_song_id = counting
+        return reads
+
+    def test_folder_tags_are_read_once_per_run(self):
+        folder = self.tagged_folder('Album', 30)
+        reads = self.count_tag_reads()
+        for number in range(30, 40):
+            self.client._existing_destination(folder, folder / f'{number + 1:02d}. New.m4a', f'id{number}')
+        self.assertLessEqual(len(reads), 30)
+
+    def test_existing_song_is_found_by_id(self):
+        folder = self.tagged_folder('Album', 5)
+        found = self.client._existing_destination(folder, folder / '99. Renamed.m4a', 'id3')
+        self.assertEqual(found, (folder / '04. Song 3.m4a', True))
+        missing = self.client._existing_destination(folder, folder / '99. Renamed.m4a', 'other')
+        self.assertEqual(missing, (folder / '99. Renamed.m4a', False))
+
+    def test_different_song_at_same_path_gets_id_suffix(self):
+        folder = self.tagged_folder('Album', 2)
+        destination = folder / '01. Song 0.m4a'
+        chosen, found = self.client._existing_destination(folder, destination, 'newid')
+        self.assertFalse(found)
+        self.assertEqual(chosen.name, '01. Song 0 [newid].m4a')
+
+    def test_saved_track_is_added_to_folder_index(self):
+        self.prepare_track()
+        self.tagged_folder('An Album - Artist [2024]', 1)
+        self.client.processTrack('token')
+        reads = self.count_tag_reads()
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertEqual(self.client.skipped, 1)
+        self.assertEqual(reads, [])
+
     def test_current_song_list_response(self):
         self.prepare_track()
         self.client.metadata.return_value = {'songs': [dict(SONG)], 'modules': {}}
@@ -428,10 +482,12 @@ class ClientTests(unittest.TestCase):
         self.prepare_track()
         for kind in ('album', 'playlist'):
             with self.subTest(kind=kind):
+                # Distinct song IDs: tracks that share an ID are skipped as
+                # duplicates, which would depend on worker timing.
                 collection = {'title': f'Test {kind}', 'primary_artists': 'Artist',
-                              'songs': [{'perma_url': URL}, {'perma_url': URL}]}
+                              'songs': [{'perma_url': URL + '1'}, {'perma_url': URL + '2'}]}
                 self.client.metadata.side_effect = lambda item_kind, token: (
-                    {'songs': [dict(SONG)]} if item_kind == 'song' else collection)
+                    {'songs': [{**SONG, 'id': token}]} if item_kind == 'song' else collection)
                 self.client.process_collection(kind, 'collection-token')
         paths = list(Path(self.temp.name).rglob('*.m4a'))
         self.assertEqual(len(paths), 4)
