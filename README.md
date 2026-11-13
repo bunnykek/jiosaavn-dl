@@ -61,6 +61,7 @@ jiosaavn-dl 'URL' -o ~/Music/JioSaavn
 jiosaavn-dl 'URL_1' 'URL_2' --quality 160
 jiosaavn-dl --input-file urls.txt -o ~/Music/JioSaavn
 jiosaavn-dl 'URL' --no-lyrics --no-cover
+jiosaavn-dl 'URL' --dry-run
 jiosaavn-dl --help
 ```
 
@@ -112,13 +113,16 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 | `--overwrite` | Replace existing tracks after a successful download and tagging |
 | `--no-lyrics` | Skip lyrics lookup |
 | `--no-cover` | Skip artwork download and embedding |
+| `--dry-run` | List planned downloads without fetching audio, covers, or lyrics; metadata is still requested |
+| `--quiet` | Suppress routine output and progress; errors are still shown |
+| `--verbose` | Show per-track details during downloads; cannot be combined with `--quiet` |
 | `-h`, `--help` | Show usage |
 | `--version` | Show installed version |
 
 The service determines which quality is available. Files keep their original AAC audio; the program does not transcode them.
 
 Album tracks are stored in `ALBUM - ARTIST [YEAR]` folders, and playlists in `Playlist - NAME` folders. Tracks are numbered in collection order. Filenames are sanitized for portability; metadata keeps the original punctuation. Album folders use the artist names returned by JioSaavn instead of guessing that several artists mean “Various Artists.”
-Collection tracks download concurrently, with up to four tracks in progress at once. Playlist pages are fetched when the collection exceeds 1,000 tracks, and track metadata included in those pages is reused.
+Collection tracks download concurrently, with up to four tracks in progress at once. A progress bar is shown in interactive terminals. Playlist pages are fetched when the collection exceeds 1,000 tracks, and track metadata included in those pages is reused.
 
 ## Reliability and troubleshooting
 
@@ -126,6 +130,8 @@ Collection tracks download concurrently, with up to four tracks in progress at o
 - Audio streams into a `.part` file and moves into place only after tagging succeeds. Interrupted downloads keep their partial data and resume with an HTTP range request when supported; if the server ignores the range, the file restarts from the beginning. Failed downloads do not replace an existing track.
 - Transient HTTP errors are retried up to three times. Increase `--timeout` for slow connections.
 - Missing optional metadata, lyrics, or artwork does not prevent downloading a track. Artwork is embedded in each track rather than saved as a separate cover file.
+- `--dry-run` still requests JioSaavn metadata to identify and list tracks, but does not request audio URLs, audio, artwork, or lyrics and does not create download files.
+- Artwork URLs use the `500x500` image variant. A live check found it available and the corresponding `1000x1000` URL unavailable for the sampled cover; larger artwork may depend on the source image.
 - A failed track does not stop the rest of an album, playlist, or batch. The final summary counts downloaded, skipped, and failed items. Rerun the command to retry failures.
 - Exit codes: `0` for success (including skipped files), `1` if any item failed, `2` for invalid CLI arguments, and `130` when interrupted with Ctrl+C.
 - Playlist requests are paginated when the service reports more tracks than the first page contains. If the service returns incomplete or repeated pages, the CLI warns about the remaining tracks.

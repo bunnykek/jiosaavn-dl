@@ -161,13 +161,21 @@ def is_true(value):
 
 class Jiosaavn:
     def __init__(self, output="Downloads", quality="320", timeout=30,
-                 overwrite=False, lyrics=True, cover=True, session=None):
+                 overwrite=False, lyrics=True, cover=True, session=None,
+                 quiet=False, verbose=False, dry_run=False):
         self.output = Path(output).expanduser()
         self.quality = str(quality)
         self.timeout = timeout
         self.overwrite = overwrite
         self.lyrics = lyrics
         self.cover = cover
+        self.quiet = quiet
+        self.verbose = verbose
+        self.dry_run = dry_run
+        self.progress_enabled = False
+        self._progress_lock = threading.Lock()
+        self._progress_total = 0
+        self._progress_done = 0
         self._provided_session = session is not None
         self.session = session if session is not None else self._new_session()
         self._worker_local = threading.local()
@@ -180,6 +188,50 @@ class Jiosaavn:
         self.downloaded = 0
         self.skipped = 0
         self.failed = 0
+        self.planned = 0
+
+    def _status(self, message, verbose_only=False):
+        if self.quiet or (verbose_only and not self.verbose):
+            return
+        print(message, flush=True)
+
+    def _warning(self, message):
+        if not self.quiet:
+            print(message, file=sys.stderr)
+
+    def _start_progress(self, total):
+        if not self.progress_enabled or self.quiet:
+            return
+        with self._progress_lock:
+            self._progress_total = total
+            self._progress_done = 0
+            self._write_progress()
+
+    def _advance_progress(self):
+        if not self.progress_enabled or self.quiet:
+            return
+        with self._progress_lock:
+            self._progress_done += 1
+            self._write_progress()
+            if self._progress_done >= self._progress_total:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+
+    def _write_progress(self):
+        width = 24
+        filled = int(width * self._progress_done / self._progress_total)
+        bar = "#" * filled + "-" * (width - filled)
+        sys.stderr.write(
+            f"\rDownloading [{bar}] {self._progress_done}/{self._progress_total}")
+        sys.stderr.flush()
+
+    def _finish_progress(self):
+        if not self.progress_enabled or self.quiet:
+            return
+        with self._progress_lock:
+            if self._progress_done < self._progress_total:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
 
     @staticmethod
     def _configure_session(session):
@@ -326,7 +378,7 @@ class Jiosaavn:
                 if lyrics.get("lyrics"):
                     audio["\xa9lyr"] = clean_text(re.sub(r"<br\s*/?>", "\n", lyrics["lyrics"]))
             except DownloadError as exc:
-                print(f"  Warning: lyrics unavailable: {exc}", file=sys.stderr)
+                self._warning(f"  Warning: lyrics unavailable: {exc}")
         if artwork:
             image_format = MP4Cover.FORMAT_PNG if artwork.startswith(b"\x89PNG") else MP4Cover.FORMAT_JPEG
             audio["covr"] = [MP4Cover(artwork, imageformat=image_format)]
@@ -399,14 +451,24 @@ class Jiosaavn:
             folder = safe_name(f"{clean_text(song.get('album')) or 'Unknown Album'} - {artists} [{song.get('year') or 'Unknown'}]")
         directory = self.output / folder
         destination = directory / f"{song_pos:02d}. {safe_name(title)}.m4a"
-        print(f"[{song_pos}/{total_tracks}] {title} — {artists}", flush=True)
+        self._status(f"[{song_pos}/{total_tracks}] {title} — {artists}",
+                     verbose_only=self.progress_enabled)
         track_id = clean_text(song.get("id") or song_id)
+        self._status(f"  JioSaavn ID: {track_id}", verbose_only=True)
         if not self.overwrite:
             destination, found = self._existing_destination(directory, destination, track_id)
             if found:
                 self._increment_counter("skipped")
-                print("  Skipped (song ID already exists; use --overwrite to replace).")
+                self._status("  Skipped (song ID already exists; use --overwrite to replace).",
+                             verbose_only=self.progress_enabled)
                 return
+        if self.dry_run:
+            self._increment_counter("planned")
+            details = f"  Would download: {destination}"
+            if self.verbose:
+                details += f" (JioSaavn ID: {track_id})"
+            self._status(details)
+            return
         encrypted = song.get("encrypted_media_url")
         if not encrypted:
             raise DownloadError("Audio is unavailable for this track (it may be restricted in your region).")
@@ -422,7 +484,7 @@ class Jiosaavn:
                     raise DownloadError("Invalid cover image.")
             except DownloadError as exc:
                 artwork = None
-                print(f"  Warning: cover unavailable: {exc}", file=sys.stderr)
+                self._warning(f"  Warning: cover unavailable: {exc}")
         temp = self.download_file(audio_url, destination)
         try:
             self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork,
@@ -431,7 +493,7 @@ class Jiosaavn:
         finally:
             temp.unlink(missing_ok=True)
         self._increment_counter("downloaded")
-        print(f"  Saved: {destination}", flush=True)
+        self._status(f"  Saved: {destination}", verbose_only=self.progress_enabled)
 
     def _process_collection_track(self, kind, data, name, pos, total, song):
         try:
@@ -440,7 +502,8 @@ class Jiosaavn:
             track_kind, track_token = parse_url(song["perma_url"])
             if track_kind != "song":
                 raise DownloadError("Collection item is not a song URL.")
-            if not self._provided_session and not hasattr(self._worker_local, "session"):
+            if (not self.dry_run and not self._provided_session
+                    and not hasattr(self._worker_local, "session")):
                 worker_session = self._new_session()
                 self._worker_local.session = worker_session
                 with self._worker_sessions_lock:
@@ -452,6 +515,8 @@ class Jiosaavn:
         except (DownloadError, OSError, MutagenError, ValueError, TypeError, KeyError) as exc:
             self._increment_counter("failed")
             print(f"  Error on track {pos}: {exc}", file=sys.stderr)
+        finally:
+            self._advance_progress()
 
     def process_collection(self, kind, token):
         data = self.metadata(kind, token)
@@ -488,16 +553,18 @@ class Jiosaavn:
                 songs.extend(page_songs)
                 if len(songs) >= reported_total:
                     break
-        print(f"{kind.title()}: {name} ({len(songs)} tracks)")
+        self._status(f"{kind.title()}: {name} ({len(songs)} tracks)")
         if reported_total > len(songs):
-            print(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.", file=sys.stderr)
+            self._warning(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.")
         try:
+            self._start_progress(len(songs))
             with ThreadPoolExecutor(max_workers=min(COLLECTION_WORKERS, len(songs))) as executor:
                 list(executor.map(
                     lambda item: self._process_collection_track(
                         kind, data, name, item[0], len(songs), item[1]),
                     enumerate(songs, 1)))
         finally:
+            self._finish_progress()
             with self._worker_sessions_lock:
                 worker_sessions, self._worker_sessions = self._worker_sessions, []
             for worker_session in worker_sessions:
@@ -541,6 +608,13 @@ def build_parser():
     parser.add_argument("--overwrite", action="store_true", help="replace existing tracks")
     parser.add_argument("--no-lyrics", action="store_true", help="skip lyrics lookup")
     parser.add_argument("--no-cover", action="store_true", help="skip cover download and embedding")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="list planned downloads without fetching audio, covers, or lyrics")
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument("--quiet", action="store_true",
+                              help="suppress routine output and progress; errors are still shown")
+    output_group.add_argument("--verbose", action="store_true",
+                              help="show per-track details during downloads")
     return parser
 
 
@@ -551,12 +625,12 @@ def main(argv=None):
         parser.error("provide at least one URL or --input-file")
     try:
         default_output = save_output(args.set_output) if args.set_output is not None else None
-        if default_output is not None:
+        if default_output is not None and not args.quiet:
             print(f"Default download folder saved: {default_output}")
         output = args.output if args.output is not None else (default_output or saved_output())
         if not output.strip():
             raise DownloadError("The output folder cannot be empty.")
-        if args.show_output:
+        if args.show_output and not args.quiet:
             print(Path(output).expanduser().resolve())
     except (DownloadError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -564,7 +638,9 @@ def main(argv=None):
     if not args.urls and not args.input_file:
         return 0
     client = Jiosaavn(output, args.quality, args.timeout, args.overwrite,
-                      not args.no_lyrics, not args.no_cover)
+                      not args.no_lyrics, not args.no_cover,
+                      quiet=args.quiet, verbose=args.verbose, dry_run=args.dry_run)
+    client.progress_enabled = not args.quiet and sys.stderr.isatty()
     try:
         found_url = False
         for url in input_urls(args.urls, args.input_file):
@@ -588,7 +664,11 @@ def main(argv=None):
         return 130
     finally:
         client.session.close()
-    print(f"\nFinished: {client.downloaded} downloaded, {client.skipped} skipped, {client.failed} failed.")
+    if not args.quiet:
+        if args.dry_run:
+            print(f"\nFinished: {client.planned} planned, {client.skipped} skipped, {client.failed} failed.")
+        else:
+            print(f"\nFinished: {client.downloaded} downloaded, {client.skipped} skipped, {client.failed} failed.")
     return 1 if client.failed else 0
 
 

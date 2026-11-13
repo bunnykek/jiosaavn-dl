@@ -174,6 +174,37 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.skipped, 1)
         self.assertEqual(self.session.get.call_count, 1)
 
+    def test_dry_run_lists_track_without_media_requests_or_files(self):
+        self.prepare_track()
+        self.client.dry_run = True
+        self.client.processTrack('token')
+        self.assertEqual(self.client.planned, 1)
+        self.assertEqual(self.client.downloaded, 0)
+        self.client.getCdnURL.assert_not_called()
+        self.session.get.assert_not_called()
+        self.assertFalse(list(Path(self.temp.name).rglob('*')))
+        self.assertIn('Would download:', self.output.getvalue())
+
+    def test_quiet_dry_run_suppresses_routine_output(self):
+        self.prepare_track()
+        self.client.dry_run = True
+        self.client.quiet = True
+        self.client.processTrack('token')
+        self.assertEqual(self.output.getvalue(), '')
+
+    def test_verbose_dry_run_shows_song_id(self):
+        self.prepare_track()
+        self.client.dry_run = True
+        self.client.verbose = True
+        self.client.processTrack('token')
+        self.assertIn('JioSaavn ID: 123', self.output.getvalue())
+
+    def test_verbose_download_shows_song_id(self):
+        self.prepare_track()
+        self.client.verbose = True
+        self.client.processTrack('token')
+        self.assertIn('JioSaavn ID: 123', self.output.getvalue())
+
     def test_collection_track_metadata_avoids_song_lookup(self):
         self.prepare_track()
         collection_song = dict(SONG, perma_url=URL)
@@ -310,11 +341,12 @@ class ClientTests(unittest.TestCase):
     def test_optional_artwork_failure_keeps_track(self):
         self.prepare_track()
         self.client.cover = True
-        self.client.metadata.return_value['123']['image'] = 'https://example.com/image.jpg'
+        self.client.metadata.return_value['123']['image'] = 'https://example.com/image-150x150.jpg'
         self.session.get.side_effect = [requests.ConnectionError('cover offline'), response(FIXTURE.read_bytes())]
         self.client.processTrack('token')
         self.assertEqual(self.client.downloaded, 1)
         self.assertIn('cover unavailable', self.output.getvalue())
+        self.assertIn('500x500', self.session.get.call_args_list[0].args[0])
 
     def test_collection_continues_after_failure(self):
         self.client.metadata = Mock(return_value={
@@ -355,6 +387,18 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.downloaded, 4)
         self.assertEqual(len(worker_sessions), 4)
         self.assertTrue(all(session.close.called for session in worker_sessions))
+
+    def test_progress_bar_tracks_collection_completion(self):
+        self.client.metadata = Mock(return_value={
+            'title': 'My Album',
+            'songs': [{'perma_url': URL} for _ in range(4)],
+        })
+        self.client.processTrack = Mock()
+        self.client.progress_enabled = True
+        self.client.process_collection('album', 'token')
+        output = self.output.getvalue()
+        self.assertIn('Downloading [', output)
+        self.assertIn('4/4', output)
 
     def test_collection_fetches_all_playlist_pages(self):
         pages = {
@@ -445,10 +489,19 @@ class CliTests(unittest.TestCase):
 
     def test_reject_invalid_options(self):
         for args in ([URL, '--timeout', '0'], [URL, '--timeout', 'nan'],
-                     [URL, '--quality', '999'], []):
+                     [URL, '--quality', '999'], [URL, '--quiet', '--verbose'], []):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
                 app.main(args)
             self.assertEqual(exc.exception.code, 2)
+
+    def test_dry_run_flag_configures_client(self):
+        with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+            client = cls.return_value
+            client.downloaded = client.skipped = client.failed = client.planned = 0
+            self.assertEqual(app.main([URL, '--dry-run', '--quiet']), 0)
+            self.assertEqual(cls.call_args.kwargs['dry_run'], True)
+            self.assertEqual(cls.call_args.kwargs['quiet'], True)
+            self.assertEqual(cls.call_args.kwargs['verbose'], False)
 
     def test_multiple_urls_and_exit_status(self):
         with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
