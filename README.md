@@ -126,7 +126,7 @@ Collection tracks download concurrently, with up to four tracks in progress at o
 
 ## Reliability and troubleshooting
 
-- Completed, readable M4A files are skipped by default. The JioSaavn song ID is stored in each downloaded file and used to recognize tracks after playlist reordering. Use `--overwrite` to refresh their audio or metadata. Empty or invalid existing files are downloaded again.
+- Completed, readable M4A files are skipped by default. The JioSaavn song ID is stored in each downloaded file and used to recognize tracks after playlist reordering. If the same song appears more than once in one playlist, only the first copy is downloaded and the repeats are counted as skipped. Use `--overwrite` to refresh their audio or metadata. Empty or invalid existing files are downloaded again.
 - Audio streams into a `.part` file and moves into place only after tagging succeeds. Interrupted downloads keep their partial data and resume with an HTTP range request when supported; if the server ignores the range, the file restarts from the beginning. Partial files are named with the requested quality (for example `.320.part`), so rerunning with a different `--quality` starts that track fresh instead of continuing the other quality's data. Failed downloads do not replace an existing track.
 - Transient HTTP errors are retried up to three times. Increase `--timeout` for slow connections.
 - Missing optional metadata, lyrics, or artwork does not prevent downloading a track. Artwork is embedded in each track rather than saved as a separate cover file.

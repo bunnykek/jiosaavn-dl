@@ -277,7 +277,39 @@ class ClientTests(unittest.TestCase):
         self.client.processTrack('token')
         self.assertEqual(self.client.downloaded, 1)
         self.assertEqual(self.client.skipped, 1)
-        self.assertEqual(reads, [])
+        # Only the matching file is re-read to confirm it, not the whole folder.
+        self.assertLessEqual(len(reads), 1)
+
+    def test_song_is_claimed_once_even_in_a_new_folder(self):
+        folder = Path(self.temp.name) / 'Album'  # does not exist yet
+        first = self.client._existing_destination(folder, folder / '01. Song.m4a', 'id1')
+        second = self.client._existing_destination(folder, folder / '02. Song.m4a', 'id1')
+        self.assertEqual(first, (folder / '01. Song.m4a', False))
+        self.assertTrue(second[1])
+
+    def test_failed_download_releases_its_claim(self):
+        self.prepare_track()
+        self.client.getCdnURL = Mock(side_effect=app.DownloadError('no audio'))
+        with self.assertRaises(app.DownloadError):
+            self.client.processTrack('token')
+        self.client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+        self.client.processTrack('token')
+        self.assertEqual((self.client.downloaded, self.client.skipped), (1, 0))
+
+    def test_same_song_twice_in_collection_downloads_once_every_time(self):
+        for attempt in range(10):
+            with self.subTest(attempt=attempt):
+                session = Mock()
+                session.get.return_value = response(FIXTURE.read_bytes())
+                client = app.Jiosaavn(Path(self.temp.name) / f'run{attempt}',
+                                      session=session, cover=False)
+                client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+                collection = {'title': 'Dupes', 'songs': [{'perma_url': URL + '1'},
+                                                          {'perma_url': URL + '2'}]}
+                client.metadata = Mock(side_effect=lambda kind, token, page=None: (
+                    {'songs': [dict(SONG)]} if kind == 'song' else collection))
+                client.process_collection('playlist', 'list')
+                self.assertEqual((client.downloaded, client.skipped, client.failed), (1, 1, 0))
 
     def test_current_song_list_response(self):
         self.prepare_track()

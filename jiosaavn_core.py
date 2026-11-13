@@ -167,6 +167,8 @@ class Jiosaavn:
         # Tagged song IDs per output folder, read once per run (see _folder_index).
         self._index_lock = threading.Lock()
         self._folder_ids = {}
+        # Song IDs being downloaded right now, per folder: {directory: {id: path}}.
+        self._folder_claims = {}
         if self._provided_session:
             self._configure_session(self.session)
 
@@ -409,25 +411,51 @@ class Jiosaavn:
         """
         index = self._folder_ids.get(directory)
         if index is None:
-            index = {path: self._tagged_song_id(path) for path in directory.glob("*.m4a")}
+            paths = directory.glob("*.m4a") if directory.is_dir() else ()
+            index = {path: self._tagged_song_id(path) for path in paths}
             self._folder_ids[directory] = index
         return index
 
     def _remember_track(self, directory, path, track_id):
-        """Record a track saved during this run in its folder's index."""
+        """Record a track saved during this run and end its claim."""
         with self._index_lock:
             index = self._folder_ids.get(directory)
             if index is not None:
                 index[path] = track_id
+            claims = self._folder_claims.get(directory)
+            if claims is not None and claims.get(track_id) == path:
+                del claims[track_id]
+
+    def _release_track(self, directory, path, track_id):
+        """Undo a claim from _existing_destination when the download failed."""
+        with self._index_lock:
+            claims = self._folder_claims.get(directory)
+            if claims is not None and claims.get(track_id) == path:
+                del claims[track_id]
 
     def _existing_destination(self, directory, destination, track_id):
-        if not directory.is_dir():
-            return destination, False
+        """Return (path, True) if this song is already in the folder.
+
+        Otherwise return (path to write, False) and claim the song ID for that
+        path, so a second worker handling the same song (a repeat in the same
+        playlist) sees it as taken instead of downloading it too. The claim
+        ends when the track is saved (_remember_track) or the download fails
+        (_release_track).
+        """
         with self._index_lock:
+            claims = self._folder_claims.setdefault(directory, {})
+            if track_id in claims:
+                return claims[track_id], True
             index = self._folder_index(directory)
             for existing, existing_id in index.items():
-                if existing_id == track_id:
+                if existing_id != track_id:
+                    continue
+                # Confirm with this one file: it may have been deleted or
+                # replaced since the folder was indexed.
+                current_id = self._tagged_song_id(existing)
+                if current_id == track_id:
                     return existing, True
+                index[existing] = current_id
             conflict = False
             if destination in index:
                 if index[destination] is not None:
@@ -441,19 +469,20 @@ class Jiosaavn:
                             return destination, True
                     except (MutagenError, OSError, ValueError):
                         pass
-            if not conflict:
-                return destination, False
-            stem = f"{destination.stem} [{safe_name(track_id)}]"
-            candidate = destination.with_name(stem + destination.suffix)
-            suffix = 2
-            while candidate in index or candidate.exists():
-                candidate_id = (index[candidate] if candidate in index
-                                else self._tagged_song_id(candidate))
-                if candidate_id == track_id:
-                    return candidate, True
-                candidate = destination.with_name(f"{stem} ({suffix}){destination.suffix}")
-                suffix += 1
-            return candidate, False
+            chosen = destination
+            if conflict:
+                stem = f"{destination.stem} [{safe_name(track_id)}]"
+                chosen = destination.with_name(stem + destination.suffix)
+                suffix = 2
+                while chosen in index or chosen.exists():
+                    chosen_id = (index[chosen] if chosen in index
+                                 else self._tagged_song_id(chosen))
+                    if chosen_id == track_id:
+                        return chosen, True
+                    chosen = destination.with_name(f"{stem} ({suffix}){destination.suffix}")
+                    suffix += 1
+            claims[track_id] = chosen
+            return chosen, False
 
     def processTrack(self, song_id, album_artist=None, song_pos=1, total_tracks=1,
                      isPlaylist=False, song_data=None):
@@ -498,6 +527,17 @@ class Jiosaavn:
                 details += f" (JioSaavn ID: {track_id})"
             self._status(details)
             return
+        try:
+            self._fetch_track(song, song_id, directory, destination, track_id,
+                              album_artist, song_pos, total_tracks)
+        except BaseException:
+            if not self.overwrite:
+                self._release_track(directory, destination, track_id)
+            raise
+
+    def _fetch_track(self, song, song_id, directory, destination, track_id,
+                     album_artist, song_pos, total_tracks):
+        """Download, tag and save one track to `destination`."""
         encrypted = song.get("encrypted_media_url")
         if not encrypted:
             raise DownloadError("Audio is unavailable for this track (it may be restricted in your region).")
