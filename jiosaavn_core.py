@@ -285,9 +285,26 @@ class Jiosaavn:
         host = parts.netloc.replace("web", "aac", 1)
         return parts._replace(netloc=host).geturl()
 
+    def partial_path(self, path):
+        """Temporary file for an in-progress download of `path`.
+
+        The requested bitrate is part of the name, so an interrupted download
+        is only resumed at the same quality; resuming another quality's bytes
+        would splice two different files together.
+        """
+        return path.with_name(f"{path.name}.{self.quality}.part")
+
+    @staticmethod
+    def _discard_partials(path):
+        """Delete leftover partial downloads of `path` at any quality."""
+        prefix = path.name + "."
+        for partial in path.parent.glob("*.part"):
+            if partial.name.startswith(prefix):
+                partial.unlink(missing_ok=True)
+
     def download_file(self, url, path):
         """Resume a partial stream into a temporary file."""
-        temp = path.with_name(path.name + ".part")
+        temp = self.partial_path(path)
         offset = temp.stat().st_size if temp.exists() else 0
         request_options = {"stream": True}
         if offset:
@@ -502,6 +519,7 @@ class Jiosaavn:
             self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork,
                         song_id=song_id)
             temp.replace(destination)
+            self._discard_partials(destination)
             self._remember_track(directory, destination, track_id)
         finally:
             temp.unlink(missing_ok=True)

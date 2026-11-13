@@ -322,7 +322,7 @@ class ClientTests(unittest.TestCase):
         self.session.get.return_value = response(b'a', headers={'Content-Length': '5'})
         with self.assertRaises(app.DownloadError):
             self.client.download_file('https://example.com/audio', path)
-        self.assertEqual(path.with_name(path.name + '.part').read_bytes(), b'a')
+        self.assertEqual(self.client.partial_path(path).read_bytes(), b'a')
 
     def test_interrupted_stream_preserves_partial_file(self):
         self.session.get.return_value = response()
@@ -332,10 +332,10 @@ class ClientTests(unittest.TestCase):
             raise requests.ConnectionError('lost connection')
 
         self.session.get.return_value.iter_content.return_value = interrupted()
+        path = Path(self.temp.name) / 'track.m4a'
         with self.assertRaises(app.DownloadError):
-            self.client.download_file('https://example.com/audio', Path(self.temp.name) / 'track.m4a')
-        self.assertEqual(
-            (Path(self.temp.name) / 'track.m4a.part').read_bytes(), b'partial')
+            self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(self.client.partial_path(path).read_bytes(), b'partial')
 
     def test_keyboard_interrupt_preserves_partial_file(self):
         self.session.get.return_value = response()
@@ -345,14 +345,14 @@ class ClientTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         self.session.get.return_value.iter_content.return_value = interrupted()
+        path = Path(self.temp.name) / 'track.m4a'
         with self.assertRaises(KeyboardInterrupt):
-            self.client.download_file('https://example.com/audio', Path(self.temp.name) / 'track.m4a')
-        self.assertEqual(
-            (Path(self.temp.name) / 'track.m4a.part').read_bytes(), b'partial')
+            self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(self.client.partial_path(path).read_bytes(), b'partial')
 
     def test_resume_partial_download_with_range_request(self):
         path = Path(self.temp.name) / 'track.m4a'
-        path.with_name(path.name + '.part').write_bytes(b'abc')
+        self.client.partial_path(path).write_bytes(b'abc')
         result = response(b'defghij', headers={
             'Content-Length': '7',
             'Content-Range': 'bytes 3-9/10',
@@ -367,7 +367,7 @@ class ClientTests(unittest.TestCase):
 
     def test_invalid_range_response_discards_partial_file(self):
         path = Path(self.temp.name) / 'track.m4a'
-        partial = path.with_name(path.name + '.part')
+        partial = self.client.partial_path(path)
         partial.write_bytes(b'abc')
         result = response(b'data', headers={'Content-Range': 'bytes 0-3/7'})
         result.status_code = 206
@@ -378,12 +378,43 @@ class ClientTests(unittest.TestCase):
 
     def test_resume_restarts_when_server_ignores_range(self):
         path = Path(self.temp.name) / 'track.m4a'
-        path.with_name(path.name + '.part').write_bytes(b'old partial')
+        self.client.partial_path(path).write_bytes(b'old partial')
         result = response(b'complete', headers={'Content-Length': '8'})
         result.status_code = 200
         self.session.get.return_value = result
         temp = self.client.download_file('https://example.com/audio', path)
         self.assertEqual(temp.read_bytes(), b'complete')
+
+    def test_partial_from_other_quality_is_not_resumed(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        self.session.get.return_value = response()
+
+        def interrupted():
+            yield b'part-of-320'
+            raise requests.ConnectionError('lost connection')
+
+        self.session.get.return_value.iter_content.return_value = interrupted()
+        with self.assertRaises(app.DownloadError):
+            self.client.download_file('https://example.com/audio', path)  # default 320 kbps
+        other_session = Mock()
+        other = app.Jiosaavn(self.temp.name, quality='160', session=other_session, cover=False)
+        result = response(b'whole-160-file', headers={'Content-Length': '14'})
+        result.status_code = 200
+        other_session.get.return_value = result
+        temp = other.download_file('https://example.com/audio', path)
+        self.assertNotIn('headers', other_session.get.call_args.kwargs)
+        self.assertEqual(temp.read_bytes(), b'whole-160-file')
+
+    def test_finished_track_removes_partials_from_other_qualities(self):
+        self.prepare_track()
+        folder = Path(self.temp.name) / 'An Album - Artist [2024]'
+        folder.mkdir()
+        stale = folder / '01. A_ Song & More.m4a.160.part'
+        stale.write_bytes(b'old')
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertFalse(stale.exists())
+        self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
 
     def test_optional_lyrics_failure_keeps_track(self):
         self.prepare_track()
