@@ -1,0 +1,76 @@
+name: Weekly API Compatibility Smoke Test
+
+on:
+  schedule:
+    # Run every Monday at 02:00 UTC
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+    # Allow manual triggering
+  pull_request:
+    # Run on PRs to catch regressions early
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: API Compatibility Smoke Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install project in development mode
+        run: python -m pip install -e .
+
+      - name: Run smoke test
+        run: python -m tests.smoke_test --verbose
+        env:
+          # Ensure no proxy interferes
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+
+      - name: Upload test results as artifact (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-failure-logs
+          path: |
+            /tmp/smoke-test-*.log
+          retention-days: 7
+
+  # Optional: Run smoke test on multiple Python versions to catch version-specific issues
+  smoke-test-matrix:
+    name: Smoke Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install project in development mode
+        run: python -m pip install -e .
+
+      - name: Run smoke test
+        run: python -m tests.smoke_test
+        env:
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
