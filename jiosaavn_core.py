@@ -235,8 +235,6 @@ class Jiosaavn:
         self._provided_session = session is not None
         self.session = session if session is not None else self._new_session()
         self._worker_local = threading.local()
-        self._existing_song_ids = {}
-        self._existing_song_ids_lock = threading.Lock()
         self._worker_sessions = []
         self._worker_sessions_lock = threading.Lock()
         self._counter_lock = threading.Lock()
@@ -434,11 +432,7 @@ class Jiosaavn:
 
     def download_file(self, url, path):
         """Resume a partial stream into a temporary file."""
-<<<<<<< Updated upstream
         temp = self.partial_path(path)
-=======
-        temp = path.with_name(f"{path.name}.{self.quality}.part")
->>>>>>> Stashed changes
         offset = temp.stat().st_size if temp.exists() else 0
         request_options = {"stream": True}
         if offset:
@@ -534,7 +528,6 @@ class Jiosaavn:
         except (AttributeError, UnicodeDecodeError):
             return None
 
-<<<<<<< Updated upstream
     def _folder_index(self, directory):
         """Map each .m4a in a folder to its tagged song ID.
 
@@ -627,49 +620,6 @@ class Jiosaavn:
                     suffix += 1
             claims[track_id] = chosen
             return chosen, False
-=======
-    def _existing_destination(self, directory, destination, track_id):
-        with self._existing_song_ids_lock:
-            existing_ids = self._existing_song_ids.get(directory)
-            if existing_ids is None:
-                existing_ids = {}
-                if directory.is_dir():
-                    existing_ids = {
-                        existing: self._tagged_song_id(existing)
-                        for existing in directory.glob("*.m4a")
-                    }
-                self._existing_song_ids[directory] = existing_ids
-
-            conflict = False
-            for existing, existing_id in existing_ids.items():
-                if existing_id == track_id:
-                    return existing, True
-                if existing == destination and existing_id is not None:
-                    conflict = True
-                elif existing == destination and existing.stat().st_size:
-                    try:
-                        MP4(existing)
-                    except (MutagenError, OSError, ValueError):
-                        continue
-                    return existing, True
-            if not conflict:
-                return destination, False
-            stem = f"{destination.stem} [{safe_name(track_id)}]"
-            candidate = destination.with_name(stem + destination.suffix)
-            suffix = 2
-            while candidate.exists():
-                if existing_ids.get(candidate) == track_id:
-                    return candidate, True
-                candidate = destination.with_name(f"{stem} ({suffix}){destination.suffix}")
-                suffix += 1
-            return candidate, False
-
-    def _remember_destination(self, destination, track_id):
-        with self._existing_song_ids_lock:
-            existing_ids = self._existing_song_ids.get(destination.parent)
-            if existing_ids is not None:
-                existing_ids[destination] = track_id
->>>>>>> Stashed changes
 
     def processTrack(self, song_id, album_artist=None, song_pos=1, total_tracks=1,
                      isPlaylist=False, song_data=None):
@@ -752,12 +702,8 @@ class Jiosaavn:
             self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork,
                         song_id=song_id)
             temp.replace(destination)
-<<<<<<< Updated upstream
             self._discard_partials(destination)
             self._remember_track(directory, destination, track_id)
-=======
-            self._remember_destination(destination, track_id)
->>>>>>> Stashed changes
         finally:
             temp.unlink(missing_ok=True)
         self._increment_counter("downloaded")
