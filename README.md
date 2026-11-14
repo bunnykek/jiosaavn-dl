@@ -111,7 +111,7 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 | `-q`, `--quality KBPS` | Request `12`, `48`, `96`, `160`, or `320` kbps; default `320` |
 | `--timeout SECONDS` | Positive timeout per network request; default `30` |
 | `--workers N` | Tracks downloaded at once from albums and playlists, `1` to `16`; default `4`. Lower it if you see rate-limit errors or have a slow connection |
-| `--genre TEXT` | Write `TEXT` as the genre tag of every track downloaded in this run. JioSaavn does not provide genres, so you choose the value. Existing tracks are skipped with their tags unchanged; add `--overwrite` to retag them |
+| `--genre TEXT` | Write `TEXT` as the genre tag of every track downloaded in this run. It replaces any genre JioSaavn returns for the track (the service does not always provide one). Existing tracks are skipped with their tags unchanged; add `--overwrite` to retag them |
 | `--overwrite` | Replace existing tracks after a successful download and tagging |
 | `--no-lyrics` | Skip lyrics lookup |
 | `--no-cover` | Skip artwork download and embedding |

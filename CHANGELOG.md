@@ -7,8 +7,9 @@ Versions follow [semantic versioning](https://semver.org/). Releases are tagged
 ## Unreleased
 
 ### Added
-- `--genre TEXT` writes a genre tag on every track downloaded in that run.
-  JioSaavn does not publish genres, so the value is yours; blank values are
+- `--genre TEXT` writes a genre tag on every track downloaded in that run,
+  replacing any genre JioSaavn returns (which is not always present). Without
+  it, the service's genre is tagged when there is one. Blank values are
   rejected. Tracks that already exist are skipped with their tags unchanged,
   so add `--overwrite` to retag them.
 

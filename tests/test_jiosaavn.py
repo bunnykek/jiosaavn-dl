@@ -179,9 +179,18 @@ class ClientTests(unittest.TestCase):
         self.client.genre = 'हिंदी सोल'
         self.assertEqual(self.downloaded_tags()['\xa9gen'], ['हिंदी सोल'])
 
-    def test_no_genre_tag_unless_a_genre_is_given(self):
+    def test_no_genre_tag_when_neither_source_has_one(self):
         self.prepare_track()
+        song = {key: value for key, value in SONG.items() if key != 'genre'}
+        self.client.metadata = Mock(return_value={'123': song})
         self.assertNotIn('\xa9gen', self.downloaded_tags())
+
+    def test_service_genre_is_used_unless_the_option_overrides_it(self):
+        self.prepare_track()
+        self.assertEqual(self.downloaded_tags()['\xa9gen'], ['Pop'])
+        self.client.overwrite = True
+        self.client.genre = 'Bollywood'
+        self.assertEqual(self.downloaded_tags()['\xa9gen'], ['Bollywood'])
 
     def test_genre_whitespace_is_collapsed_and_blank_means_none(self):
         self.assertEqual(app.Jiosaavn(self.temp.name, session=Mock(), genre='  Indian\n Pop ').genre,

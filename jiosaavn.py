@@ -99,7 +99,7 @@ def build_parser():
                              f"(1-{MAX_WORKERS}; lower it if you see rate-limit errors)")
     parser.add_argument("--genre", type=genre_text, metavar="TEXT",
                         help="write TEXT as the genre tag of every track downloaded in this run "
-                             "(JioSaavn does not provide genres)")
+                             "(replaces any genre JioSaavn returns)")
     parser.add_argument("--overwrite", action="store_true", help="replace existing tracks")
     parser.add_argument("--no-lyrics", action="store_true", help="skip lyrics lookup")
     parser.add_argument("--no-cover", action="store_true", help="skip artwork download and embedding")
