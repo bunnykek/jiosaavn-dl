@@ -543,6 +543,18 @@ class ClientTests(unittest.TestCase):
                          'bytes=17-')
         self.assertNotIn('headers', self.session.get.call_args_list[1].kwargs)
 
+    def test_repeated_range_rejection_reports_error_and_discards_partial(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        partial = self.client.partial_path(path)
+        partial.write_bytes(b'complete old file')
+        rejected = response()
+        rejected.status_code = 416
+        self.session.get.return_value = rejected
+        with self.assertRaisesRegex(app.DownloadError, 'rejected the download range twice'):
+            self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(self.session.get.call_count, 2)
+        self.assertFalse(partial.exists())
+
     def test_resume_restarts_when_server_ignores_range(self):
         path = Path(self.temp.name) / 'track.m4a'
         self.client.partial_path(path).write_bytes(b'old partial')

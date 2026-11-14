@@ -493,7 +493,7 @@ class Jiosaavn:
         """
         temp = self.partial_path(path)
         offset = temp.stat().st_size if temp.exists() else 0
-        for _ in range(2):
+        for attempt in range(2):
             request_options = {"stream": True}
             if offset:
                 request_options["headers"] = {
@@ -502,14 +502,19 @@ class Jiosaavn:
                 }
             try:
                 with self.request(url, **request_options) as response:
-                    if response.status_code == 416 and offset:
-                        temp.unlink(missing_ok=True)
-                        offset = 0
-                        continue
+                    if response.status_code == 416:
+                        if attempt == 0 and offset:
+                            temp.unlink(missing_ok=True)
+                            offset = 0
+                            continue
+                        raise DownloadError(
+                            "The server rejected the download range twice; "
+                            "the stale partial download was discarded. Retry the track."
+                        )
                     return self._save_response(temp, response, offset, progress)
             except requests.RequestException as exc:
                 raise DownloadError(f"Download interrupted: {exc}") from exc
-        return temp
+        raise DownloadError("The download could not be started.")
 
     def _save_response(self, temp, response, offset, progress):
         content_type = response.headers.get("Content-Type", "").lower()
