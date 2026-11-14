@@ -24,6 +24,7 @@ from jiosaavn_core import (
     parse_url,
     resolve_url,
     safe_name,
+    save_failed_urls,
     save_output,
     saved_output,
 )
@@ -78,6 +79,10 @@ def build_parser():
     parser.add_argument("--no-cover", action="store_true", help="skip artwork download and embedding")
     parser.add_argument("--dry-run", action="store_true",
                         help="list planned downloads without fetching audio, covers, or lyrics")
+    parser.add_argument("--failed-file", metavar="FILE",
+                        help="save the URLs of failed items to FILE so `-i FILE` can retry them; "
+                             "FILE is replaced on each run, and removed when nothing fails "
+                             "(only if this option wrote it)")
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument("--quiet", action="store_true",
                               help="suppress routine output and progress; errors are still shown")
@@ -109,6 +114,7 @@ def main(argv=None):
                       not args.no_lyrics, not args.no_cover,
                       quiet=args.quiet, verbose=args.verbose, dry_run=args.dry_run)
     client.progress_enabled = not args.quiet and sys.stderr.isatty()
+    saved_failed = 0
     try:
         found_url = False
         for url in input_urls(args.urls, args.input_file):
@@ -120,23 +126,36 @@ def main(argv=None):
                 else:
                     client.process_collection(kind, token)
             except (DownloadError, OSError, MutagenError, ValueError, TypeError, KeyError) as exc:
-                client.failed += 1
+                client.record_failure(url, exc, url)
                 print(f"Error: {url}: {exc}", file=sys.stderr)
         if not found_url:
             raise DownloadError("The input lists contain no URLs.")
     except DownloadError as exc:
-        client.failed += 1
+        client.record_failure("Input", exc)
         print(f"Error: {exc}", file=sys.stderr)
     except KeyboardInterrupt:
         print("\nInterrupted. Run the command again to retry unfinished tracks.", file=sys.stderr)
         return 130
     finally:
         client.session.close()
+        if args.failed_file:
+            try:
+                saved_failed = save_failed_urls(args.failed_file, client.failures)
+            except (DownloadError, OSError) as exc:
+                print(f"Warning: could not save the failed list: {exc}", file=sys.stderr)
     if not args.quiet:
         if args.dry_run:
             print(f"\nFinished: {client.planned} planned, {client.skipped} skipped, {client.failed} failed.")
         else:
             print(f"\nFinished: {client.downloaded} downloaded, {client.skipped} skipped, {client.failed} failed.")
+        if client.failures:
+            print(f"\nFailed ({len(client.failures)}):")
+            for failure in client.failures:
+                print(f"  {failure.label}: {failure.reason}")
+        if saved_failed:
+            plural = "" if saved_failed == 1 else "s"
+            print(f"\nSaved {saved_failed} failed URL{plural} to {args.failed_file}. "
+                  f"Retry with: jiosaavn-dl -i {args.failed_file}")
     return 1 if client.failed else 0
 
 

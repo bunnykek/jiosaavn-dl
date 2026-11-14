@@ -546,6 +546,27 @@ class ClientTests(unittest.TestCase):
         self.assertIn('no audio', self.output.getvalue())
         self.assertEqual(self.client.failed, 1)
 
+    def test_failed_collection_track_is_recorded_with_its_url(self):
+        self.progress_collection(['First Song', 'Second Song'])
+        self.client.progress_enabled = False  # recording must not depend on the bar
+        self.client.getCdnURL = Mock(side_effect=app.DownloadError('no audio'))
+        self.client.process_collection('playlist', 'list')
+        self.assertEqual(self.client.failed, 2)
+        self.assertEqual(len(self.client.failures), 2)
+        by_url = {failure.url: failure for failure in self.client.failures}
+        first = by_url[f'{URL}1']
+        self.assertEqual(first.label, 'First Song (track 1 of Pair)')
+        self.assertEqual(first.reason, 'no audio')
+        self.assertEqual(by_url[f'{URL}2'].label, 'Second Song (track 2 of Pair)')
+
+    def test_failure_before_the_title_is_known_still_has_a_label(self):
+        self.client.metadata = Mock(return_value={
+            'title': 'Mix', 'songs': [{'perma_url': 'https://example.com/not-a-song'}]})
+        self.client.process_collection('playlist', 'list')
+        self.assertEqual(self.client.failed, 1)
+        self.assertEqual(self.client.failures[0].label, 'Track 1 of Mix')
+        self.assertIsNone(self.client.failures[0].url)  # nothing to retry
+
     def test_progress_line_shows_titles_being_downloaded(self):
         self.client.progress_enabled = True
         self.client._start_progress(3)
@@ -646,6 +667,7 @@ class CliTests(unittest.TestCase):
         with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
             client = cls.return_value
             client.downloaded = client.skipped = client.failed = 0
+            client.failures = []
             self.assertEqual(app.main([URL, 'https://jiosaavn.com/album/name/album-token',
                                        'https://jiosaavn.com/featured/name/playlist-token']), 0)
             client.processTrack.assert_called_once_with('token')
@@ -662,6 +684,7 @@ class CliTests(unittest.TestCase):
             with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
                 client = cls.return_value
                 client.downloaded = client.skipped = client.failed = 0
+                client.failures = []
                 self.assertEqual(app.main(['--input-file', str(path)]), 0)
                 client.processTrack.assert_called_once_with('token')
                 client.process_collection.assert_called_once_with('album', 'album-token')
@@ -696,6 +719,7 @@ class CliTests(unittest.TestCase):
         with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
             client = cls.return_value
             client.downloaded = client.skipped = client.failed = client.planned = 0
+            client.failures = []
             self.assertEqual(app.main([URL, '--dry-run', '--quiet']), 0)
             self.assertEqual(cls.call_args.kwargs['dry_run'], True)
             self.assertEqual(cls.call_args.kwargs['quiet'], True)
@@ -705,6 +729,8 @@ class CliTests(unittest.TestCase):
         with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             client = cls.return_value
             client.downloaded = client.skipped = client.failed = 0
+            client.failures = []
+            client.record_failure.side_effect = lambda *args: setattr(client, 'failed', 1)
             result = app.main(['https://example.com/bad', URL, '--no-cover'])
             self.assertEqual(result, 1)
             client.processTrack.assert_called_once_with('token')
@@ -715,6 +741,99 @@ class CliTests(unittest.TestCase):
             cls.return_value.processTrack.side_effect = KeyboardInterrupt
             self.assertEqual(app.main([URL]), 130)
             cls.return_value.session.close.assert_called_once()
+
+    def run_with_failures(self, failures, *extra, failed=1):
+        """Run main() against a mocked client that reports `failures`."""
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            client = cls.return_value
+            client.downloaded = client.skipped = 0
+            client.failed = failed
+            client.failures = list(failures)
+            code = app.main([URL, *extra])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_final_summary_lists_failed_tracks(self):
+        failure = core.Failure('Song A (track 2 of Mix)', 'Audio is unavailable', URL + '1')
+        code, out, _ = self.run_with_failures([failure])
+        self.assertEqual(code, 1)
+        self.assertIn('Failed (1):', out)
+        self.assertIn('Song A (track 2 of Mix): Audio is unavailable', out)
+
+    def test_final_summary_has_no_failed_section_when_all_succeed(self):
+        code, out, _ = self.run_with_failures([], failed=0)
+        self.assertEqual(code, 0)
+        self.assertNotIn('Failed (', out)
+
+    def test_quiet_run_skips_the_failed_summary(self):
+        failure = core.Failure('Song A', 'no audio', URL + '1')
+        _, out, _ = self.run_with_failures([failure], '--quiet')
+        self.assertNotIn('Failed (', out)
+
+    def test_failed_file_saves_retryable_urls_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'failed.txt'
+            failures = [core.Failure('A', 'x', URL + '1'), core.Failure('A again', 'x', URL + '1'),
+                        core.Failure('No URL', 'x', None), core.Failure('B', 'y', URL + '2')]
+            _, out, _ = self.run_with_failures(failures, '--failed-file', str(path))
+            self.assertEqual(list(app.input_urls([], [str(path)])), [URL + '1', URL + '2'])
+            self.assertTrue(path.read_text(encoding='utf-8').startswith(core.FAILED_FILE_MARKER))
+            self.assertIn('Saved 2 failed URLs', out)
+
+    def test_failed_file_is_removed_after_a_clean_run(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'failed.txt'
+            core.save_failed_urls(path, [core.Failure('A', 'x', URL + '1')])
+            self.assertTrue(path.exists())
+            self.run_with_failures([], '--failed-file', str(path), failed=0)
+            self.assertFalse(path.exists())
+
+    def test_failed_file_never_replaces_a_file_it_did_not_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'my-urls.txt'
+            path.write_text('my own list\n' + URL + '\n', encoding='utf-8')
+            before = path.read_text(encoding='utf-8')
+            failure = core.Failure('A', 'x', URL + '1')
+            code, _, err = self.run_with_failures([failure], '--failed-file', str(path))
+            self.assertEqual(path.read_text(encoding='utf-8'), before)
+            self.assertIn('not created by --failed-file', err)
+            self.assertEqual(code, 1)
+            self.run_with_failures([], '--failed-file', str(path), failed=0)  # clean run
+            self.assertEqual(path.read_text(encoding='utf-8'), before)
+
+    def test_failed_file_round_trip_through_the_real_client(self):
+        with tempfile.TemporaryDirectory() as folder:
+            session = Mock()
+            session.get.return_value = response(FIXTURE.read_bytes())
+            titles = {'token1': 'First Song', 'token2': 'Second Song'}
+            collection = {'title': 'Mix', 'songs': [{'perma_url': f'{URL}1'}, {'perma_url': f'{URL}2'}]}
+
+            def make(*args, **kwargs):
+                client = core.Jiosaavn(*args, session=session, **kwargs)
+                client.metadata = Mock(side_effect=lambda kind, token, page=None: (
+                    {'songs': [{**SONG, 'id': token, 'song': titles[token],
+                                'encrypted_media_url': 'enc-' + token}]}
+                    if kind == 'song' else collection))
+
+                def cdn(encrypted):
+                    if encrypted.endswith('token2'):
+                        raise core.DownloadError('Audio is unavailable')
+                    return 'https://aac.example/song.m4a'
+
+                client.getCdnURL = Mock(side_effect=cdn)
+                return client
+
+            path = Path(folder) / 'failed.txt'
+            out = io.StringIO()
+            with patch.object(app, 'Jiosaavn', side_effect=make), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = app.main(['https://jiosaavn.com/featured/mix/list-token', '-o', folder,
+                                 '--no-cover', '--no-lyrics', '--failed-file', str(path)])
+            self.assertEqual(code, 1)
+            self.assertIn('Failed (1):', out.getvalue())
+            self.assertIn('Second Song (track 2 of Mix): Audio is unavailable', out.getvalue())
+            self.assertEqual(list(app.input_urls([], [str(path)])), [f'{URL}2'])
 
 
 class FolderSettingsTests(unittest.TestCase):

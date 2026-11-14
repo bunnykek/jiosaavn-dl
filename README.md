@@ -114,6 +114,7 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 | `--no-lyrics` | Skip lyrics lookup |
 | `--no-cover` | Skip artwork download and embedding |
 | `--dry-run` | List planned downloads without fetching audio, covers, or lyrics; metadata is still requested |
+| `--failed-file FILE` | Save the URLs of failed items to `FILE` for retrying with `-i FILE`; see below |
 | `--quiet` | Suppress routine output and progress; errors are still shown |
 | `--verbose` | Show per-track details during downloads; cannot be combined with `--quiet` |
 | `-h`, `--help` | Show usage |
@@ -132,7 +133,14 @@ Collection tracks download concurrently, with up to four tracks in progress at o
 - Missing optional metadata, lyrics, or artwork does not prevent downloading a track. Artwork is embedded in each track rather than saved as a separate cover file.
 - `--dry-run` still requests JioSaavn metadata to identify and list tracks, but does not request audio URLs, audio, artwork, or lyrics and does not create download files.
 - Artwork URLs use the `500x500` image variant. A live check found it available and the corresponding `1000x1000` URL unavailable for the sampled cover; larger artwork may depend on the source image.
-- A failed track does not stop the rest of an album, playlist, or batch. The final summary counts downloaded, skipped, and failed items. Rerun the command to retry failures.
+- A failed track does not stop the rest of an album, playlist, or batch. The final summary counts downloaded, skipped, and failed items, then lists each failure with its reason. Rerun the command to retry failures, or use `--failed-file` to save just the failed URLs:
+
+  ```sh
+  jiosaavn-dl ALBUM_URL --failed-file failed.txt   # writes failed.txt if anything fails
+  jiosaavn-dl -i failed.txt --failed-file failed.txt   # retries only those
+  ```
+
+  For a track inside an album or playlist, the file lists that track's own URL. `FILE` is replaced on each run that has failures and removed after a run with none, but only when this option wrote it (its first line is a `# jiosaavn-dl failed tracks` marker). A file the option did not write is never overwritten or removed; the run warns instead.
 - Exit codes: `0` for success (including skipped files), `1` if any item failed, `2` for invalid CLI arguments, and `130` when interrupted with Ctrl+C.
 - Playlist requests are paginated when the service reports more tracks than the first page contains. If the service returns incomplete or repeated pages, the CLI warns about the remaining tracks.
 - Regional restrictions or JioSaavn API changes may make some tracks unavailable. Errors appear in the terminal. If optional lookups fail, try `--no-lyrics --no-cover`.

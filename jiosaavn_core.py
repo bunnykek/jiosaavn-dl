@@ -12,6 +12,7 @@ import tempfile
 import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from typing import NamedTuple, Optional
 from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
@@ -28,10 +29,19 @@ __version__ = "0.4.0"
 SITE_HOSTS = frozenset(("jiosaavn.com", "www.jiosaavn.com", "m.jiosaavn.com",
                         "saavn.com", "www.saavn.com", "m.saavn.com"))
 SHORT_HOSTS = frozenset(("saavn.app.link", "jiosaavn.app.link"))
+# First line of a file written by --failed-file; marks it as safe to replace or remove.
+FAILED_FILE_MARKER = "# jiosaavn-dl failed tracks"
 
 
 class DownloadError(Exception):
     """An actionable download or metadata error."""
+
+
+class Failure(NamedTuple):
+    """One item that could not be downloaded, and how to retry it."""
+    label: str
+    reason: str
+    url: Optional[str] = None
 
 
 def config_path():
@@ -139,6 +149,34 @@ def resolve_url(url, client):
     raise DownloadError("Too many redirects in the share link. Copy its full website URL instead.")
 
 
+def save_failed_urls(path, failures):
+    """Write the URLs of failed items to `path` so `-i path` can retry them.
+
+    Returns how many URLs were written. With nothing to retry, a file written
+    by an earlier run (it starts with FAILED_FILE_MARKER) is removed so it
+    cannot go stale. A file that does not start with the marker is never
+    replaced or removed, so pointing this at your own URL list is harmless.
+    """
+    path = Path(path).expanduser()
+    try:
+        with path.open(encoding="utf-8-sig") as handle:
+            ours = handle.readline().strip() == FAILED_FILE_MARKER
+        exists = True
+    except FileNotFoundError:
+        ours = exists = False
+    urls = list(dict.fromkeys(failure.url for failure in failures if failure.url))
+    if not urls:
+        if exists and ours:
+            path.unlink()
+        return 0
+    if exists and not ours:
+        raise DownloadError(f"{path} already exists and was not created by --failed-file; "
+                            "choose another file name.")
+    lines = [FAILED_FILE_MARKER, f"# Retry with: jiosaavn-dl -i {path.name}", *urls]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(urls)
+
+
 def display_width(text):
     """Approximate number of terminal columns `text` occupies.
 
@@ -210,6 +248,7 @@ class Jiosaavn:
         self.skipped = 0
         self.failed = 0
         self.planned = 0
+        self.failures = []  # Failure records, in the order they happened
 
     def _emit(self, message, stream=None):
         """Print a line, keeping the progress bar (if any) on the last line."""
@@ -314,6 +353,12 @@ class Jiosaavn:
     def _increment_counter(self, name):
         with self._counter_lock:
             setattr(self, name, getattr(self, name) + 1)
+
+    def record_failure(self, label, reason, url=None):
+        """Count a failed item and remember it for the final summary."""
+        with self._counter_lock:
+            self.failed += 1
+            self.failures.append(Failure(label, str(reason), url))
 
     def _request_session(self):
         return getattr(self._worker_local, "session", self.session)
@@ -588,6 +633,7 @@ class Jiosaavn:
             folder = safe_name(f"{clean_text(song.get('album')) or 'Unknown Album'} - {artists} [{song.get('year') or 'Unknown'}]")
         directory = self.output / folder
         destination = directory / f"{song_pos:02d}. {safe_name(title)}.m4a"
+        self._worker_local.title = title  # lets a failure name the track
         self._track_started(song_pos, title)
         self._status(f"[{song_pos}/{total_tracks}] {title} — {artists}",
                      verbose_only=self.progress_enabled)
@@ -651,12 +697,15 @@ class Jiosaavn:
         self._status(f"  Saved: {destination}", verbose_only=self.progress_enabled)
 
     def _process_collection_track(self, kind, data, name, pos, total, song):
+        self._worker_local.title = None
+        retry_url = None  # set once the item is known to be a retryable song URL
         try:
             if not isinstance(song, dict) or not song.get("perma_url"):
                 raise DownloadError("Track is missing its URL.")
             track_kind, track_token = parse_url(song["perma_url"])
             if track_kind != "song":
                 raise DownloadError("Collection item is not a song URL.")
+            retry_url = song["perma_url"]
             if (not self.dry_run and not self._provided_session
                     and not hasattr(self._worker_local, "session")):
                 worker_session = self._new_session()
@@ -668,7 +717,9 @@ class Jiosaavn:
                               pos, total, f"Playlist - {name}" if kind == "playlist" else False,
                               song_data=song)
         except (DownloadError, OSError, MutagenError, ValueError, TypeError, KeyError) as exc:
-            self._increment_counter("failed")
+            title = self._worker_local.title
+            label = f"{title} (track {pos} of {name})" if title else f"Track {pos} of {name}"
+            self.record_failure(label, exc, retry_url)
             if self._progress_active:
                 self._track_failed(pos, total, exc)
             else:
