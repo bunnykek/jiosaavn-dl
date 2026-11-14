@@ -175,6 +175,10 @@ class ClientTests(unittest.TestCase):
         self.client.processTrack('token')
         destination = next(folder.rglob('*.m4a'))
         self.assertLessEqual(len(destination.name.encode('utf-8')), 255)
+        partial = self.client.partial_path(destination)
+        self.assertLessEqual(len(partial.name.encode('utf-8')), 255)
+        partial.write_bytes(b'partial')
+        self.assertTrue(partial.exists())
 
     def downloaded_tags(self):
         self.client.processTrack('token')

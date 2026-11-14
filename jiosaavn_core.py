@@ -720,7 +720,11 @@ class Jiosaavn:
         directory = self.output / folder
         prefix = f"{song_pos:02d}. "
         suffix = ".m4a"
-        title = safe_name(title, max_bytes=255 - len((prefix + suffix).encode("utf-8")))
+        partial_suffix = f".{self.quality}.part"
+        title = safe_name(
+            title,
+            max_bytes=255 - len((prefix + suffix + partial_suffix).encode("utf-8")),
+        )
         destination = directory / f"{prefix}{title}{suffix}"
         self._worker_local.title = title  # lets a failure name the track
         self._track_started(song_pos, title)
