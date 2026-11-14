@@ -125,7 +125,13 @@ def parse_url(url):
         kind = "playlist" if segments[1] == "featured" else segments[1]
     else:
         raise DownloadError("Unsupported URL. Expected a song, album, or playlist link.")
-    token = unquote(segments[-1])
+    # Fully decode token to catch double-encoded characters (e.g. %252F -> %2F -> /)
+    token = segments[-1]
+    while True:
+        decoded = unquote(token)
+        if decoded == token:
+            break
+        token = decoded
     if not token or any(character in token for character in "/\\?#\r\n\x00") or token in (".", ".."):
         raise DownloadError("The URL has an invalid item token.")
     return kind, token
