@@ -110,6 +110,7 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 | `--show-output` | Show the effective download folder; can run without a URL |
 | `-q`, `--quality KBPS` | Request `12`, `48`, `96`, `160`, or `320` kbps; default `320` |
 | `--timeout SECONDS` | Positive timeout per network request; default `30` |
+| `--workers N` | Tracks downloaded at once from albums and playlists, `1` to `16`; default `4`. Lower it if you see rate-limit errors or have a slow connection |
 | `--overwrite` | Replace existing tracks after a successful download and tagging |
 | `--no-lyrics` | Skip lyrics lookup |
 | `--no-cover` | Skip artwork download and embedding |
@@ -123,7 +124,7 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 The service determines which quality is available. Files keep their original AAC audio; the program does not transcode them.
 
 Album tracks are stored in `ALBUM - ARTIST [YEAR]` folders, and playlists in `Playlist - NAME` folders. Tracks are numbered in collection order. Filenames are sanitized for portability; metadata keeps the original punctuation. Album folders use the artist names returned by JioSaavn instead of guessing that several artists mean “Various Artists.”
-Collection tracks download concurrently, with up to four tracks in progress at once. In interactive terminals a progress bar stays on the last line, showing the titles currently downloading, and each finished track is printed above it as downloaded, skipped or failed. When output is piped or redirected, plain per-track lines are printed instead. Playlist pages are fetched when the collection exceeds 1,000 tracks, and track metadata included in those pages is reused.
+Collection tracks download concurrently, with up to four tracks in progress at once by default (change it with `--workers`). In interactive terminals a progress bar stays on the last line, showing the titles currently downloading, and each finished track is printed above it as downloaded, skipped or failed. When output is piped or redirected, plain per-track lines are printed instead. Playlist pages are fetched when the collection exceeds 1,000 tracks, and track metadata included in those pages is reused.
 
 ## Reliability and troubleshooting
 

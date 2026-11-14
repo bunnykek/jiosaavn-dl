@@ -24,7 +24,8 @@ from mutagen.mp4 import MP4, MP4Cover
 
 API_URL = "https://www.jiosaavn.com/api.php"
 COLLECTION_PAGE_SIZE = 1000
-COLLECTION_WORKERS = 4
+COLLECTION_WORKERS = 4  # default number of tracks downloaded at once
+MAX_WORKERS = 16  # above this, rate limiting from the service is likelier than a speedup
 __version__ = "0.4.0"
 SITE_HOSTS = frozenset(("jiosaavn.com", "www.jiosaavn.com", "m.jiosaavn.com",
                         "saavn.com", "www.saavn.com", "m.saavn.com"))
@@ -214,8 +215,9 @@ def is_true(value):
 class Jiosaavn:
     def __init__(self, output="Downloads", quality="320", timeout=30,
                  overwrite=False, lyrics=True, cover=True, session=None,
-                 quiet=False, verbose=False, dry_run=False):
+                 quiet=False, verbose=False, dry_run=False, workers=COLLECTION_WORKERS):
         self.output = Path(output).expanduser()
+        self.workers = max(1, min(int(workers), MAX_WORKERS))
         self.quality = str(quality)
         self.timeout = timeout
         self.overwrite = overwrite
@@ -767,7 +769,7 @@ class Jiosaavn:
             self._warning(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.")
         try:
             self._start_progress(len(songs))
-            with ThreadPoolExecutor(max_workers=min(COLLECTION_WORKERS, len(songs))) as executor:
+            with ThreadPoolExecutor(max_workers=min(self.workers, len(songs))) as executor:
                 list(executor.map(
                     lambda item: self._process_collection_track(
                         kind, data, name, item[0], len(songs), item[1]),

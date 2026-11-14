@@ -14,6 +14,7 @@ from jiosaavn_core import (
     COLLECTION_WORKERS,
     DownloadError,
     Jiosaavn,
+    MAX_WORKERS,
     SHORT_HOSTS,
     SITE_HOSTS,
     __version__,
@@ -57,6 +58,17 @@ def positive_timeout(value):
     return number
 
 
+def worker_count(value):
+    message = f"workers must be a whole number from 1 to {MAX_WORKERS}"
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(message) from exc
+    if not 1 <= number <= MAX_WORKERS:
+        raise argparse.ArgumentTypeError(message)
+    return number
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="jiosaavn-dl",
@@ -74,6 +86,9 @@ def build_parser():
     parser.add_argument("-q", "--quality", choices=("12", "48", "96", "160", "320"), default="320",
                         help="requested bitrate in kbps (availability depends on the track)")
     parser.add_argument("--timeout", type=positive_timeout, default=30, help="timeout per network request in seconds")
+    parser.add_argument("--workers", type=worker_count, default=COLLECTION_WORKERS, metavar="N",
+                        help=f"tracks to download at once from albums and playlists "
+                             f"(1-{MAX_WORKERS}; lower it if you see rate-limit errors)")
     parser.add_argument("--overwrite", action="store_true", help="replace existing tracks")
     parser.add_argument("--no-lyrics", action="store_true", help="skip lyrics lookup")
     parser.add_argument("--no-cover", action="store_true", help="skip artwork download and embedding")
@@ -112,7 +127,8 @@ def main(argv=None):
         return 0
     client = Jiosaavn(output, args.quality, args.timeout, args.overwrite,
                       not args.no_lyrics, not args.no_cover,
-                      quiet=args.quiet, verbose=args.verbose, dry_run=args.dry_run)
+                      quiet=args.quiet, verbose=args.verbose, dry_run=args.dry_run,
+                      workers=args.workers)
     client.progress_enabled = not args.quiet and sys.stderr.isatty()
     saved_failed = 0
     try:

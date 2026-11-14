@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -546,6 +547,43 @@ class ClientTests(unittest.TestCase):
         self.assertIn('no audio', self.output.getvalue())
         self.assertEqual(self.client.failed, 1)
 
+    def peak_concurrency(self, workers, tracks=8):
+        """Run a collection and return the most tracks that were in progress at once."""
+        state = {'active': 0, 'peak': 0}
+        lock = threading.Lock()
+
+        def work(*args, **kwargs):
+            with lock:
+                state['active'] += 1
+                state['peak'] = max(state['peak'], state['active'])
+            time.sleep(0.05)
+            with lock:
+                state['active'] -= 1
+
+        kwargs = {} if workers is None else {'workers': workers}
+        client = app.Jiosaavn(self.temp.name, session=Mock(), cover=False, **kwargs)
+        client.metadata = Mock(return_value={'title': 'Mix',
+                                             'songs': [{'perma_url': URL}] * tracks})
+        client.processTrack = Mock(side_effect=work)
+        client.process_collection('album', 'token')
+        return client, state['peak']
+
+    def test_workers_limits_how_many_tracks_download_at_once(self):
+        _, peak = self.peak_concurrency(1)
+        self.assertEqual(peak, 1)
+        _, peak = self.peak_concurrency(3)
+        self.assertGreaterEqual(peak, 2)  # really parallel
+        self.assertLessEqual(peak, 3)  # but never above the limit
+
+    def test_workers_default_matches_the_documented_value(self):
+        client, peak = self.peak_concurrency(None)
+        self.assertEqual(client.workers, core.COLLECTION_WORKERS)
+        self.assertLessEqual(peak, core.COLLECTION_WORKERS)
+
+    def test_workers_is_not_raised_above_the_track_count(self):
+        client, peak = self.peak_concurrency(16, tracks=2)
+        self.assertLessEqual(peak, 2)
+
     def test_failed_collection_track_is_recorded_with_its_url(self):
         self.progress_collection(['First Song', 'Second Song'])
         self.client.progress_enabled = False  # recording must not depend on the bar
@@ -701,9 +739,24 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(app.main(['-i', str(Path(folder) / 'missing.txt')]), 1)
 
+    def test_workers_option_is_passed_to_the_client(self):
+        for arguments, expected in (([URL], core.COLLECTION_WORKERS),
+                                    ([URL, '--workers', '2'], 2),
+                                    ([URL, '--workers', '16'], 16)):
+            with self.subTest(arguments=arguments):
+                with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+                    client = cls.return_value
+                    client.downloaded = client.skipped = client.failed = 0
+                    client.failures = []
+                    self.assertEqual(app.main(arguments), 0)
+                    self.assertEqual(cls.call_args.kwargs['workers'], expected)
+
     def test_reject_invalid_options(self):
         for args in ([URL, '--timeout', '0'], [URL, '--timeout', 'nan'],
-                     [URL, '--quality', '999'], [URL, '--quiet', '--verbose'], []):
+                     [URL, '--quality', '999'], [URL, '--quiet', '--verbose'], [],
+                     [URL, '--workers', '0'], [URL, '--workers', '-1'],
+                     [URL, '--workers', '17'], [URL, '--workers', 'many'],
+                     [URL, '--workers', '2.5']):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
                 app.main(args)
             self.assertEqual(exc.exception.code, 2)
