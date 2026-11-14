@@ -543,7 +543,7 @@ class Jiosaavn:
         return index
 
     def _remember_track(self, directory, path, track_id):
-        """Record a track saved during this run and end its claim."""
+        """Record a saved track and keep its claim for duplicate suppression."""
         with self._index_lock:
             index = self._folder_ids.get(directory)
             if index is not None:
@@ -556,17 +556,16 @@ class Jiosaavn:
         """Undo a claim from _existing_destination when the download failed."""
         with self._index_lock:
             claims = self._folder_claims.get(directory)
-            if claims is not None and claims.get(track_id) == path:
-                del claims[track_id]
+            # Keep successful claims until this client run ends. This prevents
+            # duplicate entries later in the same collection from overwriting
+            # the same destination a second time.
 
     def _existing_destination(self, directory, destination, track_id, overwrite=False):
-        """Return (path, True) if this song is already in the folder.
+        """Return an existing path or reserve a destination for this song ID.
 
-        Otherwise return (path to write, False) and claim the song ID for that
-        path, so a second worker handling the same song (a repeat in the same
-        playlist) sees it as taken instead of downloading it too. The claim
-        ends when the track is saved (_remember_track) or the download fails
-        (_release_track).
+        Successful claims remain for this client run so repeated collection
+        entries are not downloaded or overwritten more than once. Failed and
+        dry-run claims are released by the caller.
         """
         with self._index_lock:
             claims = self._folder_claims.setdefault(directory, {})
@@ -653,11 +652,11 @@ class Jiosaavn:
         destination, found = self._existing_destination(
             directory, destination, track_id, overwrite=self.overwrite)
         if found:
-                self._increment_counter("skipped")
-                self._status("  Skipped (song ID already exists; use --overwrite to replace).",
-                             verbose_only=self.progress_enabled)
-                self._track_finished(song_pos, total_tracks, title, artists, "Skipped")
-                return
+            self._increment_counter("skipped")
+            self._status("  Skipped (song ID already exists; use --overwrite to replace).",
+                         verbose_only=self.progress_enabled)
+            self._track_finished(song_pos, total_tracks, title, artists, "Skipped")
+            return
         if self.dry_run:
             self._increment_counter("planned")
             details = f"  Would download: {destination}"
