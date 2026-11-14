@@ -281,7 +281,7 @@ class ClientTests(unittest.TestCase):
         self.client.processTrack('token', song_pos=2, song_data=updated_song)
         files = list(Path(self.temp.name).rglob('*.m4a'))
         self.assertEqual(files, [original])
-        self.assertEqual(MP4(original)['\\xa9nam'], ['Updated title'])
+        self.assertEqual(MP4(original)['\xa9nam'], ['Updated title'])
         self.assertEqual(self.client.downloaded, 2)
 
     def test_overwrite_claims_duplicate_song_only_once(self):
