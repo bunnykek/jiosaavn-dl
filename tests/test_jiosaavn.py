@@ -21,7 +21,7 @@ URL = 'https://www.jiosaavn.com/song/example/token'
 SONG = {
     'song': 'A: Song &amp; More', 'album': 'An Album', 'year': '2024',
     'primary_artists': 'Artist', 'encrypted_media_url': 'encrypted',
-    'id': '123', 'has_lyrics': 'false', 'explicit_content': '0',
+    'id': '123', 'has_lyrics': 'false', 'explicit_content': '0', 'genre': 'Pop',
 }
 
 
@@ -158,6 +158,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(path.parent.name, 'An Album - Artist [2024]')
         tags = MP4(path)
         self.assertEqual(tags['\xa9nam'], ['A: Song & More'])
+        self.assertEqual(tags['\xa9gen'], ['Pop'])
         self.assertEqual(tags['trkn'], [(1, 1)])
         self.assertEqual(tags['rtng'], [2])
         self.assertEqual(tags['----:com.apple.iTunes:JioSaavn ID'], [b'123'])

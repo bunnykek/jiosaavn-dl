@@ -122,6 +122,7 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 | `--version` | Show installed version |
 
 The service determines which quality is available. Files keep their original AAC audio; the program does not transcode them.
+Track tags include the genre when it is provided by JioSaavn.
 
 Album tracks are stored in `ALBUM - ARTIST [YEAR]` folders, and playlists in `Playlist - NAME` folders. Tracks are numbered in collection order. Filenames are sanitized for portability; metadata keeps the original punctuation. Album folders use the artist names returned by JioSaavn instead of guessing that several artists mean “Various Artists.”
 Collection tracks download concurrently, with up to four tracks in progress at once by default (change it with `--workers`). In interactive terminals a progress bar stays on the last line, showing the titles currently downloading with how much of each has arrived (a percentage, or megabytes when the server does not report a size), and each finished track is printed above it as downloaded, skipped or failed. When output is piped or redirected, plain per-track lines are printed instead. Playlist pages are fetched when the collection exceeds 1,000 tracks, and track metadata included in those pages is reused.
