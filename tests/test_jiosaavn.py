@@ -907,7 +907,7 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as exc:
             app.main(['--version'])
         self.assertEqual(exc.exception.code, 0)
-        self.assertIn('0.4.0', output.getvalue())
+        self.assertIn(core.__version__, output.getvalue())
 
     def test_dry_run_flag_configures_client(self):
         with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):

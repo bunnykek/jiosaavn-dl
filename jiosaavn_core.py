@@ -26,7 +26,7 @@ API_URL = "https://www.jiosaavn.com/api.php"
 COLLECTION_PAGE_SIZE = 1000
 COLLECTION_WORKERS = 4  # default number of tracks downloaded at once
 MAX_WORKERS = 16  # above this, rate limiting from the service is likelier than a speedup
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 SITE_HOSTS = frozenset(("jiosaavn.com", "www.jiosaavn.com", "m.jiosaavn.com",
                         "saavn.com", "www.saavn.com", "m.saavn.com"))
 SHORT_HOSTS = frozenset(("saavn.app.link", "jiosaavn.app.link"))
