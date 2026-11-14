@@ -1,6 +1,10 @@
 """Offline regression tests. The fixture is 0.1 seconds of generated silence."""
 import contextlib
+<<<<<<< Updated upstream
 from concurrent.futures import Future
+=======
+from concurrent.futures import ThreadPoolExecutor
+>>>>>>> Stashed changes
 import io
 import os
 from pathlib import Path
@@ -177,6 +181,41 @@ class ClientTests(unittest.TestCase):
         self.client.processTrack('token', song_pos=2)
         self.assertEqual(self.client.skipped, 1)
         self.assertEqual(self.session.get.call_count, 1)
+
+    def test_existing_destination_cache_is_thread_safe_and_updated(self):
+        directory = Path(self.temp.name) / 'An Album - Artist [2024]'
+        directory.mkdir()
+        for index, track_id in enumerate(('existing-1', 'existing-2')):
+            path = directory / f'{index}.m4a'
+            path.write_bytes(FIXTURE.read_bytes())
+            self.client.tagger(dict(SONG, id=track_id), path, song_id=track_id)
+
+        original_read = core.Jiosaavn._tagged_song_id
+        barrier = threading.Barrier(4)
+
+        def delayed_read(path):
+            time.sleep(0.01)
+            return original_read(path)
+
+        def lookup(index):
+            barrier.wait(timeout=2)
+            destination = directory / f'new-{index}.m4a'
+            return self.client._existing_destination(directory, destination, str(index))
+
+        with patch.object(core.Jiosaavn, '_tagged_song_id',
+                          side_effect=delayed_read) as read_id:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                list(executor.map(lookup, range(4)))
+            self.assertEqual(read_id.call_count, 2)
+
+            self.prepare_track()
+            for index in range(2):
+                song = dict(SONG, id=f'new-{index}', song=f'New Song {index}')
+                self.client.processTrack('token', song_data=song, song_pos=index + 3)
+            self.assertEqual(read_id.call_count, 2)
+            _, found = self.client._existing_destination(
+                directory, directory / 'missing.m4a', 'new-1')
+            self.assertTrue(found)
 
     def test_dry_run_lists_track_without_media_requests_or_files(self):
         self.prepare_track()
@@ -390,7 +429,12 @@ class ClientTests(unittest.TestCase):
         self.session.get.return_value = response(b'a', headers={'Content-Length': '5'})
         with self.assertRaises(app.DownloadError):
             self.client.download_file('https://example.com/audio', path)
+<<<<<<< Updated upstream
         self.assertEqual(self.client.partial_path(path).read_bytes(), b'a')
+=======
+        self.assertEqual(
+            path.with_name(path.name + '.320.part').read_bytes(), b'a')
+>>>>>>> Stashed changes
 
     def test_interrupted_stream_preserves_partial_file(self):
         self.session.get.return_value = response()
@@ -402,8 +446,14 @@ class ClientTests(unittest.TestCase):
         self.session.get.return_value.iter_content.return_value = interrupted()
         path = Path(self.temp.name) / 'track.m4a'
         with self.assertRaises(app.DownloadError):
+<<<<<<< Updated upstream
             self.client.download_file('https://example.com/audio', path)
         self.assertEqual(self.client.partial_path(path).read_bytes(), b'partial')
+=======
+            self.client.download_file('https://example.com/audio', Path(self.temp.name) / 'track.m4a')
+        self.assertEqual(
+            (Path(self.temp.name) / 'track.m4a.320.part').read_bytes(), b'partial')
+>>>>>>> Stashed changes
 
     def test_keyboard_interrupt_preserves_partial_file(self):
         self.session.get.return_value = response()
@@ -415,12 +465,22 @@ class ClientTests(unittest.TestCase):
         self.session.get.return_value.iter_content.return_value = interrupted()
         path = Path(self.temp.name) / 'track.m4a'
         with self.assertRaises(KeyboardInterrupt):
+<<<<<<< Updated upstream
             self.client.download_file('https://example.com/audio', path)
         self.assertEqual(self.client.partial_path(path).read_bytes(), b'partial')
 
     def test_resume_partial_download_with_range_request(self):
         path = Path(self.temp.name) / 'track.m4a'
         self.client.partial_path(path).write_bytes(b'abc')
+=======
+            self.client.download_file('https://example.com/audio', Path(self.temp.name) / 'track.m4a')
+        self.assertEqual(
+            (Path(self.temp.name) / 'track.m4a.320.part').read_bytes(), b'partial')
+
+    def test_resume_partial_download_with_range_request(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        path.with_name(path.name + '.320.part').write_bytes(b'abc')
+>>>>>>> Stashed changes
         result = response(b'defghij', headers={
             'Content-Length': '7',
             'Content-Range': 'bytes 3-9/10',
@@ -435,7 +495,11 @@ class ClientTests(unittest.TestCase):
 
     def test_invalid_range_response_discards_partial_file(self):
         path = Path(self.temp.name) / 'track.m4a'
+<<<<<<< Updated upstream
         partial = self.client.partial_path(path)
+=======
+        partial = path.with_name(path.name + '.320.part')
+>>>>>>> Stashed changes
         partial.write_bytes(b'abc')
         result = response(b'data', headers={'Content-Range': 'bytes 0-3/7'})
         result.status_code = 206
@@ -446,13 +510,18 @@ class ClientTests(unittest.TestCase):
 
     def test_resume_restarts_when_server_ignores_range(self):
         path = Path(self.temp.name) / 'track.m4a'
+<<<<<<< Updated upstream
         self.client.partial_path(path).write_bytes(b'old partial')
+=======
+        path.with_name(path.name + '.320.part').write_bytes(b'old partial')
+>>>>>>> Stashed changes
         result = response(b'complete', headers={'Content-Length': '8'})
         result.status_code = 200
         self.session.get.return_value = result
         temp = self.client.download_file('https://example.com/audio', path)
         self.assertEqual(temp.read_bytes(), b'complete')
 
+<<<<<<< Updated upstream
     def test_partial_from_other_quality_is_not_resumed(self):
         path = Path(self.temp.name) / 'track.m4a'
         self.session.get.return_value = response()
@@ -483,6 +552,19 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.downloaded, 1)
         self.assertFalse(stale.exists())
         self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
+=======
+    def test_partial_download_is_scoped_to_quality(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        path.with_name(path.name + '.320.part').write_bytes(b'wrong quality')
+        self.client.quality = '160'
+        self.session.get.return_value = response(b'complete')
+
+        temp = self.client.download_file('https://example.com/audio', path)
+
+        self.assertEqual(temp.name, 'track.m4a.160.part')
+        self.assertEqual(temp.read_bytes(), b'complete')
+        self.assertNotIn('headers', self.session.get.call_args.kwargs)
+>>>>>>> Stashed changes
 
     def test_optional_lyrics_failure_keeps_track(self):
         self.prepare_track()
