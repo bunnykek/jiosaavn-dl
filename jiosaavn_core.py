@@ -774,12 +774,12 @@ class Jiosaavn:
         try:
             self._start_progress(len(songs))
             executor = ThreadPoolExecutor(max_workers=min(self.workers, len(songs)))
-            futures = [
-                executor.submit(self._process_collection_track,
-                                kind, data, name, pos, len(songs), song)
-                for pos, song in enumerate(songs, 1)
-            ]
+            futures = []
             try:
+                for pos, song in enumerate(songs, 1):
+                    futures.append(executor.submit(
+                        self._process_collection_track,
+                        kind, data, name, pos, len(songs), song))
                 for future in as_completed(futures):
                     future.result()
             except BaseException:
