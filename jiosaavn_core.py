@@ -6,9 +6,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote, urljoin, urlsplit
 
@@ -137,6 +139,36 @@ def resolve_url(url, client):
     raise DownloadError("Too many redirects in the share link. Copy its full website URL instead.")
 
 
+def display_width(text):
+    """Approximate number of terminal columns `text` occupies.
+
+    Wide (CJK) characters count as 2; combining marks and control characters
+    count as 0. When unsure it errs on the wide side, so a line that is cut to
+    fit never wraps and breaks the progress redraw.
+    """
+    width = 0
+    for char in text:
+        if unicodedata.category(char) in ("Mn", "Me", "Cf", "Cc"):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
+
+
+def fit_width(text, width):
+    """Cut `text` with an ellipsis so it takes at most `width` columns."""
+    width = max(width, 1)
+    if display_width(text) <= width:
+        return text
+    kept, used = [], 0
+    for char in text:
+        char_width = display_width(char)
+        if used + char_width > width - 1:
+            break
+        kept.append(char)
+        used += char_width
+    return "".join(kept) + "…"
+
+
 def is_true(value):
     return str(value).lower() in ("1", "true", "yes")
 
@@ -158,6 +190,8 @@ class Jiosaavn:
         self._progress_lock = threading.Lock()
         self._progress_total = 0
         self._progress_done = 0
+        self._progress_active = False  # True while the bar is on screen
+        self._active_titles = {}  # {track number: title} shown on the bar line
         self._provided_session = session is not None
         self.session = session if session is not None else self._new_session()
         self._worker_local = threading.local()
@@ -177,14 +211,25 @@ class Jiosaavn:
         self.failed = 0
         self.planned = 0
 
+    def _emit(self, message, stream=None):
+        """Print a line, keeping the progress bar (if any) on the last line."""
+        stream = stream or sys.stdout
+        if not self._progress_active:
+            print(message, file=stream, flush=True)
+            return
+        with self._progress_lock:
+            sys.stderr.write("\r\033[K")  # erase the bar, print the line, redraw the bar
+            print(message, file=stream, flush=True)
+            self._write_progress()
+
     def _status(self, message, verbose_only=False):
         if self.quiet or (verbose_only and not self.verbose):
             return
-        print(message, flush=True)
+        self._emit(message)
 
     def _warning(self, message):
         if not self.quiet:
-            print(message, file=sys.stderr)
+            self._emit(message, sys.stderr)
 
     def _start_progress(self, total):
         if not self.progress_enabled or self.quiet:
@@ -192,33 +237,67 @@ class Jiosaavn:
         with self._progress_lock:
             self._progress_total = total
             self._progress_done = 0
+            self._active_titles = {}
+            self._progress_active = True
             self._write_progress()
 
-    def _advance_progress(self):
-        if not self.progress_enabled or self.quiet:
+    def _advance_progress(self, pos=None):
+        if not self._progress_active:
             return
         with self._progress_lock:
+            self._active_titles.pop(pos, None)
             self._progress_done += 1
             self._write_progress()
             if self._progress_done >= self._progress_total:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
+                self._progress_active = False
 
     def _write_progress(self):
+        """Redraw the bar line. The caller must hold self._progress_lock."""
         width = 24
-        filled = int(width * self._progress_done / self._progress_total)
+        total = max(self._progress_total, 1)
+        filled = int(width * self._progress_done / total)
         bar = "#" * filled + "-" * (width - filled)
-        sys.stderr.write(
-            f"\rDownloading [{bar}] {self._progress_done}/{self._progress_total}")
+        line = f"Downloading [{bar}] {self._progress_done}/{self._progress_total}"
+        if self._active_titles:
+            line += "  " + ", ".join(f"{pos:02d} {title}"
+                                     for pos, title in sorted(self._active_titles.items()))
+        columns = shutil.get_terminal_size((80, 24)).columns
+        sys.stderr.write("\r\033[K" + fit_width(line, columns - 1))
         sys.stderr.flush()
 
     def _finish_progress(self):
-        if not self.progress_enabled or self.quiet:
+        if not self._progress_active:
             return
         with self._progress_lock:
+            self._active_titles = {}
             if self._progress_done < self._progress_total:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
+            self._progress_active = False
+
+    def _track_started(self, pos, title):
+        """Show `title` on the progress line while its track is downloading."""
+        if not self._progress_active:
+            return
+        with self._progress_lock:
+            self._active_titles[pos] = " ".join(str(title).split())
+            self._write_progress()
+
+    def _track_finished(self, pos, total, title, artists, outcome, announce=True):
+        """Drop a track from the progress line and print how it ended."""
+        if not self._progress_active:
+            return
+        with self._progress_lock:
+            self._active_titles.pop(pos, None)
+        if announce:
+            self._emit(f"  [{pos}/{total}] {outcome}: {title} — {artists}")
+
+    def _track_failed(self, pos, total, exc):
+        with self._progress_lock:
+            title = self._active_titles.pop(pos, None)
+        self._emit(f"  [{pos}/{total}] Failed: {title or f'track {pos}'} — {exc}", sys.stderr)
 
     @staticmethod
     def _configure_session(session):
@@ -509,6 +588,7 @@ class Jiosaavn:
             folder = safe_name(f"{clean_text(song.get('album')) or 'Unknown Album'} - {artists} [{song.get('year') or 'Unknown'}]")
         directory = self.output / folder
         destination = directory / f"{song_pos:02d}. {safe_name(title)}.m4a"
+        self._track_started(song_pos, title)
         self._status(f"[{song_pos}/{total_tracks}] {title} — {artists}",
                      verbose_only=self.progress_enabled)
         track_id = clean_text(song.get("id") or song_id)
@@ -519,6 +599,7 @@ class Jiosaavn:
                 self._increment_counter("skipped")
                 self._status("  Skipped (song ID already exists; use --overwrite to replace).",
                              verbose_only=self.progress_enabled)
+                self._track_finished(song_pos, total_tracks, title, artists, "Skipped")
                 return
         if self.dry_run:
             self._increment_counter("planned")
@@ -526,6 +607,8 @@ class Jiosaavn:
             if self.verbose:
                 details += f" (JioSaavn ID: {track_id})"
             self._status(details)
+            self._track_finished(song_pos, total_tracks, title, artists,
+                                 "Would download", announce=False)
             return
         try:
             self._fetch_track(song, song_id, directory, destination, track_id,
@@ -534,6 +617,7 @@ class Jiosaavn:
             if not self.overwrite:
                 self._release_track(directory, destination, track_id)
             raise
+        self._track_finished(song_pos, total_tracks, title, artists, "Downloaded")
 
     def _fetch_track(self, song, song_id, directory, destination, track_id,
                      album_artist, song_pos, total_tracks):
@@ -585,9 +669,12 @@ class Jiosaavn:
                               song_data=song)
         except (DownloadError, OSError, MutagenError, ValueError, TypeError, KeyError) as exc:
             self._increment_counter("failed")
-            print(f"  Error on track {pos}: {exc}", file=sys.stderr)
+            if self._progress_active:
+                self._track_failed(pos, total, exc)
+            else:
+                print(f"  Error on track {pos}: {exc}", file=sys.stderr)
         finally:
-            self._advance_progress()
+            self._advance_progress(pos)
 
     def process_collection(self, kind, token):
         data = self.metadata(kind, token)

@@ -1,6 +1,7 @@
 """Offline regression tests. The fixture is 0.1 seconds of generated silence."""
 import contextlib
 import io
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -505,6 +506,76 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.downloaded, 4)
         self.assertEqual(len(worker_sessions), 4)
         self.assertTrue(all(session.close.called for session in worker_sessions))
+
+    def progress_collection(self, titles):
+        """Set up a playlist whose tracks have the given titles, with the bar on."""
+        songs = [{'perma_url': f'{URL}{number}'} for number in range(1, len(titles) + 1)]
+        by_token = {f'token{number}': title for number, title in enumerate(titles, 1)}
+        collection = {'title': 'Pair', 'songs': songs}
+        self.client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+        self.session.get.return_value = response(FIXTURE.read_bytes())
+        self.client.metadata = Mock(side_effect=lambda kind, token, page=None: (
+            {'songs': [{**SONG, 'id': token, 'song': by_token[token]}]}
+            if kind == 'song' else collection))
+        self.client.progress_enabled = True
+
+    def test_progress_mode_prints_a_line_for_each_downloaded_track(self):
+        self.progress_collection(['First Song', 'Second Song'])
+        self.client.process_collection('playlist', 'list')
+        output = self.output.getvalue()
+        self.assertIn('Downloaded: First Song', output)
+        self.assertIn('Downloaded: Second Song', output)
+        self.assertIn('2/2', output)
+
+    def test_progress_mode_prints_skipped_tracks(self):
+        self.progress_collection(['First Song', 'Second Song'])
+        self.client.process_collection('playlist', 'list')
+        self.output.truncate(0)
+        self.output.seek(0)
+        self.client.process_collection('playlist', 'list')
+        output = self.output.getvalue()
+        self.assertIn('Skipped: First Song', output)
+        self.assertIn('Skipped: Second Song', output)
+        self.assertNotIn('Downloaded:', output)
+
+    def test_progress_mode_prints_failed_tracks_with_their_title(self):
+        self.progress_collection(['First Song'])
+        self.client.getCdnURL = Mock(side_effect=app.DownloadError('no audio'))
+        self.client.process_collection('playlist', 'list')
+        self.assertIn('Failed: First Song', self.output.getvalue())
+        self.assertIn('no audio', self.output.getvalue())
+        self.assertEqual(self.client.failed, 1)
+
+    def test_progress_line_shows_titles_being_downloaded(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.assertIn('02 Second Song', self.output.getvalue().split('\r')[-1])
+        self.client._track_finished(2, 3, 'Second Song', 'Artist', 'Downloaded')
+        self.assertNotIn('Second Song', self.output.getvalue().split('\r')[-1])
+
+    def test_progress_line_fits_the_terminal_width(self):
+        self.client.progress_enabled = True
+        with patch('shutil.get_terminal_size', return_value=os.terminal_size((40, 20))):
+            self.client._start_progress(3)
+            self.client._track_started(1, 'A very long song title ' * 5)
+            self.client._track_started(2, '日本語のとても長いタイトル' * 5)
+        for line in self.output.getvalue().split('\r'):
+            self.assertLess(core.display_width(line.replace('\x1b[K', '')), 40)
+
+    def test_display_width_counts_wide_and_combining_characters(self):
+        self.assertEqual(core.display_width('abc'), 3)
+        self.assertEqual(core.display_width('日本'), 4)
+        self.assertEqual(core.display_width('é'), 1)  # letter plus a combining accent
+        self.assertEqual(core.display_width('क्'), 1)  # letter plus a virama
+
+    def test_plain_output_is_unchanged_without_the_bar(self):
+        self.prepare_track()
+        self.client.processTrack('token')
+        output = self.output.getvalue()
+        self.assertIn('[1/1]', output)
+        self.assertNotIn('Downloaded:', output)
+        self.assertNotIn('\r', output)
 
     def test_progress_bar_tracks_collection_completion(self):
         self.client.metadata = Mock(return_value={
