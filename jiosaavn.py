@@ -21,6 +21,7 @@ from jiosaavn_core import (
     clean_text,
     config_path,
     is_true,
+    normalize_genre,
     normalized_url,
     parse_url,
     resolve_url,
@@ -69,6 +70,13 @@ def worker_count(value):
     return number
 
 
+def genre_text(value):
+    genre = normalize_genre(value)
+    if genre is None:
+        raise argparse.ArgumentTypeError("genre cannot be blank")
+    return genre
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="jiosaavn-dl",
@@ -89,6 +97,9 @@ def build_parser():
     parser.add_argument("--workers", type=worker_count, default=COLLECTION_WORKERS, metavar="N",
                         help=f"tracks to download at once from albums and playlists "
                              f"(1-{MAX_WORKERS}; lower it if you see rate-limit errors)")
+    parser.add_argument("--genre", type=genre_text, metavar="TEXT",
+                        help="write TEXT as the genre tag of every track downloaded in this run "
+                             "(JioSaavn does not provide genres)")
     parser.add_argument("--overwrite", action="store_true", help="replace existing tracks")
     parser.add_argument("--no-lyrics", action="store_true", help="skip lyrics lookup")
     parser.add_argument("--no-cover", action="store_true", help="skip artwork download and embedding")
@@ -128,7 +139,7 @@ def main(argv=None):
     client = Jiosaavn(output, args.quality, args.timeout, args.overwrite,
                       not args.no_lyrics, not args.no_cover,
                       quiet=args.quiet, verbose=args.verbose, dry_run=args.dry_run,
-                      workers=args.workers)
+                      workers=args.workers, genre=args.genre)
     client.progress_enabled = not args.quiet and sys.stderr.isatty()
     saved_failed = 0
     try:

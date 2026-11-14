@@ -4,6 +4,14 @@ Versions follow [semantic versioning](https://semver.org/). Releases are tagged
 `vX.Y.Z`; the version number is defined once, as `__version__` in
 `jiosaavn_core.py`. For anything older than 0.5.0, see the git history.
 
+## Unreleased
+
+### Added
+- `--genre TEXT` writes a genre tag on every track downloaded in that run.
+  JioSaavn does not publish genres, so the value is yours; blank values are
+  rejected. Tracks that already exist are skipped with their tags unchanged,
+  so add `--overwrite` to retag them.
+
 ## 0.5.0 - 2026-11-14
 
 ### Added

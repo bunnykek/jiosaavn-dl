@@ -96,6 +96,13 @@ def clean_text(value):
     return unescape(str(value or ""))
 
 
+def normalize_genre(value):
+    """Collapse whitespace; blank or missing means no genre."""
+    if value is None:
+        return None
+    return " ".join(str(value).split()) or None
+
+
 def safe_name(value, fallback="Unknown"):
     # Keep each component portable, bounded, and inside the output directory.
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", clean_text(value))
@@ -221,8 +228,9 @@ def is_true(value):
 class Jiosaavn:
     def __init__(self, output="Downloads", quality="320", timeout=30,
                  overwrite=False, lyrics=True, cover=True, session=None,
-                 quiet=False, verbose=False, dry_run=False, workers=COLLECTION_WORKERS):
+                 quiet=False, verbose=False, dry_run=False, workers=COLLECTION_WORKERS, genre=None):
         self.output = Path(output).expanduser()
+        self.genre = normalize_genre(genre)
         self.workers = max(1, min(int(workers), MAX_WORKERS))
         self.quality = str(quality)
         self.timeout = timeout
@@ -534,6 +542,8 @@ class Jiosaavn:
                 audio[atom] = value
         audio["aART"] = clean_text(album_artist or song.get("primary_artists"))
         audio["trkn"] = [(pos, total)]
+        if self.genre:
+            audio["\xa9gen"] = self.genre
         audio["rtng"] = [4 if is_true(song.get("explicit_content")) else 2]
         track_id = song.get("id") or song_id
         if track_id:

@@ -165,6 +165,30 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.downloaded, 1)
         self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
 
+    def downloaded_tags(self):
+        self.client.processTrack('token')
+        return MP4(next(Path(self.temp.name).rglob('*.m4a')))
+
+    def test_genre_is_written_to_the_genre_tag(self):
+        self.prepare_track()
+        self.client.genre = 'Bollywood'
+        self.assertEqual(self.downloaded_tags()['\xa9gen'], ['Bollywood'])
+
+    def test_genre_supports_non_latin_text(self):
+        self.prepare_track()
+        self.client.genre = 'हिंदी सोल'
+        self.assertEqual(self.downloaded_tags()['\xa9gen'], ['हिंदी सोल'])
+
+    def test_no_genre_tag_unless_a_genre_is_given(self):
+        self.prepare_track()
+        self.assertNotIn('\xa9gen', self.downloaded_tags())
+
+    def test_genre_whitespace_is_collapsed_and_blank_means_none(self):
+        self.assertEqual(app.Jiosaavn(self.temp.name, session=Mock(), genre='  Indian\n Pop ').genre,
+                         'Indian Pop')
+        for blank in (None, '', '   \n'):
+            self.assertIsNone(app.Jiosaavn(self.temp.name, session=Mock(), genre=blank).genre)
+
     def test_skip_valid_file(self):
         self.prepare_track()
         self.client.processTrack('token')
@@ -892,6 +916,26 @@ class CliTests(unittest.TestCase):
                     client.failures = []
                     self.assertEqual(app.main(arguments), 0)
                     self.assertEqual(cls.call_args.kwargs['workers'], expected)
+
+    def test_genre_option_is_passed_to_the_client(self):
+        for arguments, expected in (([URL], None),
+                                    ([URL, '--genre', 'Bollywood'], 'Bollywood'),
+                                    ([URL, '--genre', '  Indian  Pop '], 'Indian Pop')):
+            with self.subTest(arguments=arguments):
+                with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+                    client = cls.return_value
+                    client.downloaded = client.skipped = client.failed = 0
+                    client.failures = []
+                    self.assertEqual(app.main(arguments), 0)
+                    self.assertEqual(cls.call_args.kwargs['genre'], expected)
+
+    def test_blank_genre_is_rejected(self):
+        for blank in ('', '   '):
+            with self.subTest(genre=blank):
+                with contextlib.redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit) as exc:
+                    app.main([URL, '--genre', blank])
+                self.assertEqual(exc.exception.code, 2)
+                self.assertIn('genre', errors.getvalue())
 
     def test_reject_invalid_options(self):
         for args in ([URL, '--timeout', '0'], [URL, '--timeout', 'nan'],
