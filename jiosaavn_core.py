@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NamedTuple, Optional
 from urllib.parse import unquote, urljoin, urlsplit
 
@@ -559,7 +559,7 @@ class Jiosaavn:
             if claims is not None and claims.get(track_id) == path:
                 del claims[track_id]
 
-    def _existing_destination(self, directory, destination, track_id):
+    def _existing_destination(self, directory, destination, track_id, overwrite=False):
         """Return (path, True) if this song is already in the folder.
 
         Otherwise return (path to write, False) and claim the song ID for that
@@ -580,6 +580,9 @@ class Jiosaavn:
                 # replaced since the folder was indexed.
                 current_id = self._tagged_song_id(existing)
                 if current_id == track_id:
+                    if overwrite:
+                        claims[track_id] = existing
+                        return existing, False
                     return existing, True
                 index[existing] = current_id
             conflict = False
@@ -592,6 +595,9 @@ class Jiosaavn:
                     try:
                         if destination.stat().st_size:
                             MP4(destination)
+                            if overwrite:
+                                claims[track_id] = destination
+                                return destination, False
                             return destination, True
                     except (MutagenError, OSError, ValueError):
                         pass
@@ -604,6 +610,9 @@ class Jiosaavn:
                     chosen_id = (index[chosen] if chosen in index
                                  else self._tagged_song_id(chosen))
                     if chosen_id == track_id:
+                        if overwrite:
+                            claims[track_id] = chosen
+                            return chosen, False
                         return chosen, True
                     chosen = destination.with_name(f"{stem} ({suffix}){destination.suffix}")
                     suffix += 1
@@ -641,9 +650,9 @@ class Jiosaavn:
                      verbose_only=self.progress_enabled)
         track_id = clean_text(song.get("id") or song_id)
         self._status(f"  JioSaavn ID: {track_id}", verbose_only=True)
-        if not self.overwrite:
-            destination, found = self._existing_destination(directory, destination, track_id)
-            if found:
+        destination, found = self._existing_destination(
+            directory, destination, track_id, overwrite=self.overwrite)
+        if found:
                 self._increment_counter("skipped")
                 self._status("  Skipped (song ID already exists; use --overwrite to replace).",
                              verbose_only=self.progress_enabled)
@@ -657,13 +666,13 @@ class Jiosaavn:
             self._status(details)
             self._track_finished(song_pos, total_tracks, title, artists,
                                  "Would download", announce=False)
+            self._release_track(directory, destination, track_id)
             return
         try:
             self._fetch_track(song, song_id, directory, destination, track_id,
                               album_artist, song_pos, total_tracks)
         except BaseException:
-            if not self.overwrite:
-                self._release_track(directory, destination, track_id)
+            self._release_track(directory, destination, track_id)
             raise
         self._track_finished(song_pos, total_tracks, title, artists, "Downloaded")
 
@@ -718,7 +727,7 @@ class Jiosaavn:
                               data.get("primary_artists") if kind == "album" else None,
                               pos, total, f"Playlist - {name}" if kind == "playlist" else False,
                               song_data=song)
-        except (DownloadError, OSError, MutagenError, ValueError, TypeError, KeyError) as exc:
+        except Exception as exc:
             title = self._worker_local.title
             label = f"{title} (track {pos} of {name})" if title else f"Track {pos} of {name}"
             self.record_failure(label, exc, retry_url)
@@ -769,11 +778,25 @@ class Jiosaavn:
             self._warning(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.")
         try:
             self._start_progress(len(songs))
-            with ThreadPoolExecutor(max_workers=min(self.workers, len(songs))) as executor:
-                list(executor.map(
-                    lambda item: self._process_collection_track(
-                        kind, data, name, item[0], len(songs), item[1]),
-                    enumerate(songs, 1)))
+            executor = ThreadPoolExecutor(max_workers=min(self.workers, len(songs)))
+            futures = [
+                executor.submit(self._process_collection_track,
+                                kind, data, name, pos, len(songs), song)
+                for pos, song in enumerate(songs, 1)
+            ]
+            try:
+                for future in as_completed(futures):
+                    future.result()
+            except BaseException:
+                # Cancel queued tracks on interruption or an unexpected worker error.
+                # Running requests finish within their configured timeout before
+                # their sessions are closed in the outer finally block.
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
         finally:
             self._finish_progress()
             with self._worker_sessions_lock:
