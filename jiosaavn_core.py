@@ -115,10 +115,16 @@ def safe_name(value, fallback="Unknown", max_bytes=255):
     # Keep each component portable, bounded, and inside the output directory.
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", clean_text(value))
     value = sanitize(value).strip(" .")
+    if max_bytes < 1:
+        return fallback
     if len(value.encode("utf-8")) > max_bytes:
         suffix = "…"
-        prefix = _truncate_utf8(value, max_bytes - len(suffix.encode("utf-8")))
-        value = prefix.rstrip(" .") + suffix
+        suffix_bytes = len(suffix.encode("utf-8"))
+        if max_bytes < suffix_bytes:
+            return fallback
+        prefix = _truncate_utf8(value, max(max_bytes - suffix_bytes, 0))
+        value = (prefix.rstrip(" .") + suffix) if prefix else suffix
+        value = _truncate_utf8(value, max_bytes)
     return value or fallback
 
 
@@ -828,10 +834,12 @@ class Jiosaavn:
         if not isinstance(songs, list) or not songs:
             raise DownloadError("This collection has no available tracks.")
         name = clean_text(data.get("title") or data.get("listname")) or "Untitled"
-        try:
-            reported_total = int(data.get("list_count", len(songs)))
-        except (ValueError, TypeError):
-            reported_total = len(songs)
+        reported_total = len(songs)
+        raw_reported_total = data.get("list_count")
+        if isinstance(raw_reported_total, int) and raw_reported_total >= 0:
+            reported_total = raw_reported_total
+        elif isinstance(raw_reported_total, str) and raw_reported_total.strip().isdigit():
+            reported_total = int(raw_reported_total)
         if kind == "playlist" and reported_total > len(songs):
             page_size = len(songs)
             max_pages = (reported_total + page_size - 1) // page_size

@@ -116,6 +116,9 @@ class UrlTests(unittest.TestCase):
             self.assertNotIn('\\', result)
             self.assertLessEqual(len(result.encode('utf-8')), 255)
             self.assertNotIn(result, ('.', '..', 'CON'))
+        self.assertEqual(app.safe_name('title', max_bytes=0), 'Unknown')
+        self.assertEqual(app.safe_name('क' * 100, max_bytes=1), 'Unknown')
+        self.assertEqual(len(app.safe_name('क' * 100, max_bytes=3).encode('utf-8')), 3)
 
 
 class ClientTests(unittest.TestCase):
@@ -875,6 +878,19 @@ class ClientTests(unittest.TestCase):
             [call('playlist', 'playlist-token'),
              call('playlist', 'playlist-token', page=2),
              call('playlist', 'playlist-token', page=3)])
+
+    def test_collection_ignores_invalid_reported_track_count(self):
+        for reported_total in (-1, 'not-a-number'):
+            with self.subTest(reported_total=reported_total):
+                self.client.metadata = Mock(return_value={
+                    'title': 'Metadata edge case',
+                    'list_count': reported_total,
+                    'songs': [{'perma_url': URL + '1'}],
+                })
+                self.client.processTrack = Mock()
+                self.client.process_collection('playlist', 'token')
+                self.client.processTrack.assert_called_once()
+                self.assertEqual(self.client.metadata.call_count, 1)
 
     def test_album_and_playlist_download_all_tracks(self):
         self.prepare_track()
