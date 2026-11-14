@@ -543,22 +543,18 @@ class Jiosaavn:
         return index
 
     def _remember_track(self, directory, path, track_id):
-        """Record a saved track and keep its claim for duplicate suppression."""
+        """Record a saved track; keep its claim to suppress same-run duplicates."""
         with self._index_lock:
             index = self._folder_ids.get(directory)
             if index is not None:
                 index[path] = track_id
+
+    def _release_track(self, directory, path, track_id):
+        """Release a claim when a dry run or failed download leaves no saved file."""
+        with self._index_lock:
             claims = self._folder_claims.get(directory)
             if claims is not None and claims.get(track_id) == path:
                 del claims[track_id]
-
-    def _release_track(self, directory, path, track_id):
-        """Undo a claim from _existing_destination when the download failed."""
-        with self._index_lock:
-            claims = self._folder_claims.get(directory)
-            # Keep successful claims until this client run ends. This prevents
-            # duplicate entries later in the same collection from overwriting
-            # the same destination a second time.
 
     def _existing_destination(self, directory, destination, track_id, overwrite=False):
         """Return an existing path or reserve a destination for this song ID.
