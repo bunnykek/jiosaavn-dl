@@ -433,6 +433,38 @@ class ClientTests(unittest.TestCase):
             'Range': 'bytes=3-', 'Accept-Encoding': 'identity',
         })
 
+    def test_download_reports_progress_against_the_content_length(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        result = response(b'abcdefgh', headers={'Content-Length': '8'})
+        result.iter_content.return_value = [b'ab', b'cd', b'efgh']
+        self.session.get.return_value = result
+        seen = []
+        self.client.download_file('https://example.com/audio', path,
+                                  progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(2, 8), (4, 8), (8, 8)])
+
+    def test_resumed_download_progress_counts_the_bytes_already_saved(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        self.client.partial_path(path).write_bytes(b'abc')
+        result = response(b'defgh', headers={'Content-Length': '5', 'Content-Range': 'bytes 3-7/8'})
+        result.iter_content.return_value = [b'de', b'fgh']
+        result.status_code = 206
+        self.session.get.return_value = result
+        seen = []
+        self.client.download_file('https://example.com/audio', path,
+                                  progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(5, 8), (8, 8)])
+
+    def test_download_progress_without_a_known_size_has_no_total(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        result = response(b'abcd')
+        result.iter_content.return_value = [b'ab', b'cd']
+        self.session.get.return_value = result
+        seen = []
+        self.client.download_file('https://example.com/audio', path,
+                                  progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(2, None), (4, None)])
+
     def test_invalid_range_response_discards_partial_file(self):
         path = Path(self.temp.name) / 'track.m4a'
         partial = self.client.partial_path(path)
@@ -672,6 +704,55 @@ class ClientTests(unittest.TestCase):
         self.assertIn('02 Second Song', self.output.getvalue().split('\r')[-1])
         self.client._track_finished(2, 3, 'Second Song', 'Artist', 'Downloaded')
         self.assertNotIn('Second Song', self.output.getvalue().split('\r')[-1])
+
+    def last_bar(self):
+        return self.output.getvalue().split('\r')[-1].replace('\x1b[K', '')
+
+    def test_progress_line_shows_the_percent_of_each_track(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.client._track_progress(2, 45, 100)
+        self.assertIn('02 45% Second Song', self.last_bar())
+        self.client._track_progress(2, 100, 100)
+        self.assertIn('02 100% Second Song', self.last_bar())
+
+    def test_progress_line_shows_megabytes_when_the_size_is_unknown(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.client._track_progress(2, 3_300_000, None)
+        self.assertIn('02 3.1MB Second Song', self.last_bar())
+
+    def test_percent_is_only_redrawn_when_it_changes(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.client._track_progress(2, 45, 100)
+        before = len(self.output.getvalue())
+        self.client._track_progress(2, 45, 100)  # same whole percent
+        self.assertEqual(len(self.output.getvalue()), before)
+        self.client._track_progress(2, 46, 100)
+        self.assertGreater(len(self.output.getvalue()), before)
+
+    def test_percent_of_a_finished_or_unknown_track_is_ignored(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.client._track_finished(2, 3, 'Second Song', 'Artist', 'Downloaded')
+        self.client._track_progress(2, 50, 100)  # late callback from a finished track
+        self.client._track_progress(3, 50, 100)  # a track that never started
+        self.assertNotIn('50%', self.output.getvalue())
+
+    def test_progress_mode_shows_real_download_percent(self):
+        self.progress_collection(['First Song'])
+        data = FIXTURE.read_bytes()
+        result = response(data, headers={'Content-Length': str(len(data))})
+        result.iter_content.return_value = [data[:100], data[100:]]
+        self.session.get.return_value = result
+        self.client.process_collection('playlist', 'list')
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertRegex(self.output.getvalue(), r'01 \d+% First Song')
 
     def test_progress_line_fits_the_terminal_width(self):
         self.client.progress_enabled = True

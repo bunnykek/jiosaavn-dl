@@ -232,6 +232,7 @@ class Jiosaavn:
         self._progress_done = 0
         self._progress_active = False  # True while the bar is on screen
         self._active_titles = {}  # {track number: title} shown on the bar line
+        self._active_amount = {}  # {track number: "45%" or "3.1MB"} shown next to the title
         self._provided_session = session is not None
         self.session = session if session is not None else self._new_session()
         self._worker_local = threading.local()
@@ -279,6 +280,7 @@ class Jiosaavn:
             self._progress_total = total
             self._progress_done = 0
             self._active_titles = {}
+            self._active_amount = {}
             self._progress_active = True
             self._write_progress()
 
@@ -287,6 +289,7 @@ class Jiosaavn:
             return
         with self._progress_lock:
             self._active_titles.pop(pos, None)
+            self._active_amount.pop(pos, None)
             self._progress_done += 1
             self._write_progress()
             if self._progress_done >= self._progress_total:
@@ -302,8 +305,9 @@ class Jiosaavn:
         bar = "#" * filled + "-" * (width - filled)
         line = f"Downloading [{bar}] {self._progress_done}/{self._progress_total}"
         if self._active_titles:
-            line += "  " + ", ".join(f"{pos:02d} {title}"
-                                     for pos, title in sorted(self._active_titles.items()))
+            line += "  " + ", ".join(
+                f"{pos:02d} {self._active_amount[pos] + ' ' if pos in self._active_amount else ''}{title}"
+                for pos, title in sorted(self._active_titles.items()))
         columns = shutil.get_terminal_size((80, 24)).columns
         sys.stderr.write("\r\033[K" + fit_width(line, columns - 1))
         sys.stderr.flush()
@@ -313,6 +317,7 @@ class Jiosaavn:
             return
         with self._progress_lock:
             self._active_titles = {}
+            self._active_amount = {}
             if self._progress_done < self._progress_total:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
@@ -332,12 +337,29 @@ class Jiosaavn:
             return
         with self._progress_lock:
             self._active_titles.pop(pos, None)
+            self._active_amount.pop(pos, None)
         if announce:
             self._emit(f"  [{pos}/{total}] {outcome}: {title} — {artists}")
+
+    def _track_progress(self, pos, done, total):
+        """Show how much of a track has downloaded next to its title."""
+        if not self._progress_active:
+            return
+        if total:
+            amount = f"{min(done * 100 // total, 100)}%"
+        else:
+            amount = f"{done / (1024 * 1024):.1f}MB"
+        with self._progress_lock:
+            # Redraw only when the shown value changes, and never for a track
+            # that has already finished (a late callback).
+            if pos in self._active_titles and self._active_amount.get(pos) != amount:
+                self._active_amount[pos] = amount
+                self._write_progress()
 
     def _track_failed(self, pos, total, exc):
         with self._progress_lock:
             title = self._active_titles.pop(pos, None)
+            self._active_amount.pop(pos, None)
         self._emit(f"  [{pos}/{total}] Failed: {title or f'track {pos}'} — {exc}", sys.stderr)
 
     @staticmethod
@@ -430,8 +452,13 @@ class Jiosaavn:
             if partial.name.startswith(prefix):
                 partial.unlink(missing_ok=True)
 
-    def download_file(self, url, path):
-        """Resume a partial stream into a temporary file."""
+    def download_file(self, url, path, progress=None):
+        """Resume a partial stream into a temporary file.
+
+        `progress(done, total)`, if given, is called after each chunk with the
+        bytes saved so far (including a resumed prefix) and the full file size,
+        or None when the server does not say how large the file is.
+        """
         temp = self.partial_path(path)
         offset = temp.stat().st_size if temp.exists() else 0
         request_options = {"stream": True}
@@ -462,11 +489,19 @@ class Jiosaavn:
                         temp.unlink(missing_ok=True)
                         raise DownloadError("The server encoded a ranged response; retry without resuming.")
                 size = 0
+                saved_before = offset if append else 0
+                total_size = expected_total
+                if total_size is None and not response.headers.get("Content-Encoding"):
+                    length = response.headers.get("Content-Length")
+                    if length and length.isdigit():
+                        total_size = saved_before + int(length)
                 with temp.open("ab" if append else "wb") as handle:
                     for chunk in response.iter_content(chunk_size=128 * 1024):
                         if chunk:
                             handle.write(chunk)
                             size += len(chunk)
+                            if progress:
+                                progress(saved_before + size, total_size)
                 if not size:
                     if not offset:
                         temp.unlink(missing_ok=True)
@@ -697,7 +732,9 @@ class Jiosaavn:
             except DownloadError as exc:
                 artwork = None
                 self._warning(f"  Warning: cover unavailable: {exc}")
-        temp = self.download_file(audio_url, destination)
+        temp = self.download_file(
+            audio_url, destination,
+            progress=lambda done, total: self._track_progress(song_pos, done, total))
         try:
             self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork,
                         song_id=song_id)
