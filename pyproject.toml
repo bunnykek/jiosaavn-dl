@@ -7,6 +7,8 @@ name = "jiosaavn-dl"
 dynamic = ["version", "dependencies"]
 description = "Download JioSaavn songs, albums, and playlists with metadata and artwork"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 keywords = ["jiosaavn", "music", "downloader", "cli"]
 classifiers = [
