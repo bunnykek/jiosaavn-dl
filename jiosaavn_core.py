@@ -527,7 +527,8 @@ class Jiosaavn:
         audio = MP4(song_path)
         for atom, key in (("\xa9nam", "song"), ("\xa9alb", "album"),
                           ("\xa9ART", "primary_artists"), ("\xa9wrt", "music"),
-                          ("\xa9day", "release_date"), ("cprt", "copyright_text")):
+                          ("\xa9day", "release_date"), ("\xa9gen", "genre"),
+                          ("cprt", "copyright_text")):
             value = clean_text(song.get(key))
             if value:
                 audio[atom] = value
