@@ -103,10 +103,22 @@ def normalize_genre(value):
     return " ".join(str(value).split()) or None
 
 
-def safe_name(value, fallback="Unknown"):
+def _truncate_utf8(value, max_bytes):
+    """Return the longest prefix of `value` that fits in `max_bytes`."""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", "ignore")
+
+
+def safe_name(value, fallback="Unknown", max_bytes=255):
     # Keep each component portable, bounded, and inside the output directory.
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", clean_text(value))
-    value = sanitize(value).strip(" .")[:160].rstrip(" .")
+    value = sanitize(value).strip(" .")
+    if len(value.encode("utf-8")) > max_bytes:
+        suffix = "…"
+        prefix = _truncate_utf8(value, max_bytes - len(suffix.encode("utf-8")))
+        value = prefix.rstrip(" .") + suffix
     return value or fallback
 
 
@@ -475,60 +487,69 @@ class Jiosaavn:
         """
         temp = self.partial_path(path)
         offset = temp.stat().st_size if temp.exists() else 0
-        request_options = {"stream": True}
-        if offset:
-            request_options["headers"] = {
-                "Range": f"bytes={offset}-",
-                "Accept-Encoding": "identity",
-            }
-        try:
-            with self.request(url, **request_options) as response:
-                content_type = response.headers.get("Content-Type", "").lower()
-                if "text/" in content_type or "json" in content_type:
-                    raise DownloadError("The server returned an error page instead of media.")
-                append = offset > 0 and response.status_code == 206
-                expected_total = None
-                if append:
-                    content_range = response.headers.get("Content-Range", "")
-                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
-                    if not match or int(match.group(1)) != offset or int(match.group(2)) < offset:
+        for _ in range(2):
+            request_options = {"stream": True}
+            if offset:
+                request_options["headers"] = {
+                    "Range": f"bytes={offset}-",
+                    "Accept-Encoding": "identity",
+                }
+            try:
+                with self.request(url, **request_options) as response:
+                    if response.status_code == 416 and offset:
                         temp.unlink(missing_ok=True)
-                        raise DownloadError("The server returned an invalid range response.")
-                    if match.group(3) != "*":
-                        expected_total = int(match.group(3))
-                        if int(match.group(2)) >= expected_total:
-                            temp.unlink(missing_ok=True)
-                            raise DownloadError("The server returned an invalid range response.")
-                    if response.headers.get("Content-Encoding", "").lower() not in ("", "identity"):
-                        temp.unlink(missing_ok=True)
-                        raise DownloadError("The server encoded a ranged response; retry without resuming.")
-                size = 0
-                saved_before = offset if append else 0
-                total_size = expected_total
-                if total_size is None and not response.headers.get("Content-Encoding"):
-                    length = response.headers.get("Content-Length")
-                    if length and length.isdigit():
-                        total_size = saved_before + int(length)
-                with temp.open("ab" if append else "wb") as handle:
-                    for chunk in response.iter_content(chunk_size=128 * 1024):
-                        if chunk:
-                            handle.write(chunk)
-                            size += len(chunk)
-                            if progress:
-                                progress(saved_before + size, total_size)
-                if not size:
-                    if not offset:
-                        temp.unlink(missing_ok=True)
-                    raise DownloadError("The server returned an empty file.")
-                expected = response.headers.get("Content-Length")
-                if expected and expected.isdigit() and not response.headers.get("Content-Encoding"):
-                    if size != int(expected):
-                        raise DownloadError("Download was incomplete. Please retry.")
-                if expected_total is not None and temp.stat().st_size != expected_total:
-                    raise DownloadError("Download was incomplete. Please retry.")
-            return temp
-        except requests.RequestException as exc:
-            raise DownloadError(f"Download interrupted: {exc}") from exc
+                        offset = 0
+                        continue
+                    return self._save_response(temp, response, offset, progress)
+            except requests.RequestException as exc:
+                raise DownloadError(f"Download interrupted: {exc}") from exc
+        return temp
+
+    def _save_response(self, temp, response, offset, progress):
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "text/" in content_type or "json" in content_type:
+            raise DownloadError("The server returned an error page instead of media.")
+        append = offset > 0 and response.status_code == 206
+        expected_total = None
+        if append:
+            content_range = response.headers.get("Content-Range", "")
+            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
+            if not match or int(match.group(1)) != offset or int(match.group(2)) < offset:
+                temp.unlink(missing_ok=True)
+                raise DownloadError("The server returned an invalid range response.")
+            if match.group(3) != "*":
+                expected_total = int(match.group(3))
+                if int(match.group(2)) >= expected_total:
+                    temp.unlink(missing_ok=True)
+                    raise DownloadError("The server returned an invalid range response.")
+            if response.headers.get("Content-Encoding", "").lower() not in ("", "identity"):
+                temp.unlink(missing_ok=True)
+                raise DownloadError("The server encoded a ranged response; retry without resuming.")
+        size = 0
+        saved_before = offset if append else 0
+        total_size = expected_total
+        if total_size is None and not response.headers.get("Content-Encoding"):
+            length = response.headers.get("Content-Length")
+            if length and length.isdigit():
+                total_size = saved_before + int(length)
+        with temp.open("ab" if append else "wb") as handle:
+            for chunk in response.iter_content(chunk_size=128 * 1024):
+                if chunk:
+                    handle.write(chunk)
+                    size += len(chunk)
+                    if progress:
+                        progress(saved_before + size, total_size)
+        if not size:
+            if not offset:
+                temp.unlink(missing_ok=True)
+            raise DownloadError("The server returned an empty file.")
+        expected = response.headers.get("Content-Length")
+        if expected and expected.isdigit() and not response.headers.get("Content-Encoding"):
+            if size != int(expected):
+                raise DownloadError("Download was incomplete. Please retry.")
+        if expected_total is not None and temp.stat().st_size != expected_total:
+            raise DownloadError("Download was incomplete. Please retry.")
+        return temp
 
     def tagger(self, song, song_path, album_artist=None, pos=1, total=1, artwork=None,
                song_id=None):
@@ -697,7 +718,10 @@ class Jiosaavn:
         else:
             folder = safe_name(f"{clean_text(song.get('album')) or 'Unknown Album'} - {artists} [{song.get('year') or 'Unknown'}]")
         directory = self.output / folder
-        destination = directory / f"{song_pos:02d}. {safe_name(title)}.m4a"
+        prefix = f"{song_pos:02d}. "
+        suffix = ".m4a"
+        title = safe_name(title, max_bytes=255 - len((prefix + suffix).encode("utf-8")))
+        destination = directory / f"{prefix}{title}{suffix}"
         self._worker_local.title = title  # lets a failure name the track
         self._track_started(song_pos, title)
         self._status(f"[{song_pos}/{total_tracks}] {title} — {artists}",

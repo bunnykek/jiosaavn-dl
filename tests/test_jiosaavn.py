@@ -108,12 +108,13 @@ class UrlTests(unittest.TestCase):
                 app.parse_url(url)
 
     def test_portable_names(self):
-        for name in ('../../escape', 'AC/DC', 'A:B?C', '.', '', 'CON', 'x' * 300):
+        for name in ('../../escape', 'AC/DC', 'A:B?C', '.', '', 'CON', 'x' * 300,
+                     'क' * 100):
             result = app.safe_name(name)
             self.assertTrue(result)
             self.assertNotIn('/', result)
             self.assertNotIn('\\', result)
-            self.assertLessEqual(len(result), 160)
+            self.assertLessEqual(len(result.encode('utf-8')), 255)
             self.assertNotIn(result, ('.', '..', 'CON'))
 
 
@@ -164,6 +165,16 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(tags['----:com.apple.iTunes:JioSaavn ID'], [b'123'])
         self.assertEqual(self.client.downloaded, 1)
         self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
+
+    def test_long_unicode_track_filename_fits_filesystem_limit(self):
+        title = 'क' * 100
+        folder = Path(self.temp.name)
+        self.client.metadata = Mock(return_value={'123': {**SONG, 'song': title}})
+        self.client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+        self.session.get.return_value = response(FIXTURE.read_bytes())
+        self.client.processTrack('token')
+        destination = next(folder.rglob('*.m4a'))
+        self.assertLessEqual(len(destination.name.encode('utf-8')), 255)
 
     def downloaded_tags(self):
         self.client.processTrack('token')
@@ -509,6 +520,21 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(app.DownloadError):
             self.client.download_file('https://example.com/audio', path)
         self.assertFalse(partial.exists())
+
+    def test_stale_complete_partial_restarts_after_range_is_rejected(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        partial = self.client.partial_path(path)
+        partial.write_bytes(b'complete old file')
+        rejected = response()
+        rejected.status_code = 416
+        result = response(b'fresh complete file', headers={'Content-Length': '19'})
+        self.session.get.side_effect = [rejected, result]
+        temp = self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(temp.read_bytes(), b'fresh complete file')
+        self.assertEqual(self.session.get.call_count, 2)
+        self.assertEqual(self.session.get.call_args_list[0].kwargs['headers']['Range'],
+                         'bytes=17-')
+        self.assertNotIn('headers', self.session.get.call_args_list[1].kwargs)
 
     def test_resume_restarts_when_server_ignores_range(self):
         path = Path(self.temp.name) / 'track.m4a'
