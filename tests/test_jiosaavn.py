@@ -276,21 +276,25 @@ class ClientTests(unittest.TestCase):
         self.prepare_track()
         self.client.processTrack('token', song_pos=1)
         original = next(Path(self.temp.name).rglob('*.m4a'))
-        self.client.overwrite = True
+        overwrite_client = app.Jiosaavn(self.temp.name, session=self.session,
+                                        cover=False, overwrite=True)
+        overwrite_client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
         updated_song = {**SONG, 'song': 'Updated title'}
-        self.client.processTrack('token', song_pos=2, song_data=updated_song)
+        overwrite_client.processTrack('token', song_pos=2, song_data=updated_song)
         files = list(Path(self.temp.name).rglob('*.m4a'))
         self.assertEqual(files, [original])
         self.assertEqual(MP4(original)['\xa9nam'], ['Updated title'])
-        self.assertEqual(self.client.downloaded, 2)
+        self.assertEqual(overwrite_client.downloaded, 1)
 
     def test_overwrite_claims_duplicate_song_only_once(self):
         self.prepare_track()
         self.client.overwrite = True
-        self.client.metadata = Mock(return_value={
+        collection = {
             'title': 'Duplicates',
             'songs': [{'perma_url': URL + '1'}, {'perma_url': URL + '2'}],
-        })
+        }
+        self.client.metadata = Mock(side_effect=lambda kind, token, page=None: (
+            {'songs': [dict(SONG)]} if kind == 'song' else collection))
         self.client.process_collection('playlist', 'list')
         self.assertEqual((self.client.downloaded, self.client.skipped), (1, 1))
 
@@ -517,10 +521,10 @@ class ClientTests(unittest.TestCase):
         executor = Mock()
         futures = [Future(), Future(), Future()]
         executor.submit.side_effect = futures
-        with patch.object(core, 'ThreadPoolExecutor', return_value=executor), \\
-                patch.object(core, 'as_completed', side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                self.client.process_collection('playlist', 'token')
+        with patch.object(core, 'ThreadPoolExecutor', return_value=executor):
+            with patch.object(core, 'as_completed', side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.client.process_collection('playlist', 'token')
         executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
         self.assertTrue(all(future.cancelled() for future in futures))
 
