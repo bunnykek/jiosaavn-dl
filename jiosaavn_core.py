@@ -543,11 +543,18 @@ class Jiosaavn:
         return index
 
     def _remember_track(self, directory, path, track_id):
-        """Record a saved track; keep its claim to suppress same-run duplicates."""
+        """Record a saved track and retain overwrite claims for this client run."""
         with self._index_lock:
             index = self._folder_ids.get(directory)
             if index is not None:
                 index[path] = track_id
+            # Normal downloads can rely on the folder index for duplicate
+            # detection. In overwrite mode, retain the claim so a duplicate
+            # later in this same collection does not overwrite the file twice.
+            claims = self._folder_claims.get(directory)
+            if (not self.overwrite and claims is not None
+                    and claims.get(track_id) == path):
+                del claims[track_id]
 
     def _release_track(self, directory, path, track_id):
         """Release a claim when a dry run or failed download leaves no saved file."""
