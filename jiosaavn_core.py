@@ -76,33 +76,60 @@ def config_path():
     return root / "jiosaavn-dl/config.json"
 
 
-def saved_output():
+def load_config():
+    """Load the full config dict, returning defaults for missing keys.
+    Raises DownloadError for invalid config (corrupt JSON, wrong types)."""
     path = config_path()
+    defaults = {
+        "output": "Downloads",
+        "quality": "320",
+        "workers": COLLECTION_WORKERS,
+        "genre": None,
+        "template": None,
+        "overwrite": False,
+        "no_lyrics": False,
+        "no_cover": False,
+        "timeout": 30,
+        "max_speed": None,  # bytes/sec, None = unlimited
+        "proxy": None,
+    }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or not isinstance(data.get("output"), str) or not data["output"].strip():
-            raise ValueError("missing output folder")
-        return data["output"]
+        if not isinstance(data, dict):
+            raise ValueError("config must be a JSON object")
+        # Merge with defaults, keeping only known keys
+        return {k: data.get(k, v) for k, v in defaults.items()}
     except FileNotFoundError:
-        return "Downloads"
-    except (OSError, ValueError) as exc:
-        raise DownloadError(f"Cannot read settings at {path}: {exc}. Use --set-output to save a folder again, or -o for this download.") from exc
+        return defaults
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise DownloadError(f"Cannot read settings at {path}: {exc}. Use 'jiosaavn-dl config reset' to clear, or fix the config file.") from exc
 
 
-def save_output(folder):
-        if not folder.strip():
-            raise DownloadError("The output folder cannot be empty.")
-        destination = Path(folder).expanduser().resolve()
-        if destination.exists() and not destination.is_dir():
-            raise DownloadError(f"The output path is a file, not a folder: {destination}")
-        return _write_config({"output": str(destination)})
+def save_config(**kwargs):
+    """Save configuration keys, preserving existing ones."""
+    path = config_path()
+    current = load_config()
+    current.update({k: v for k, v in kwargs.items() if v is not None})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix="config-", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(current, handle, indent=2)
+            handle.write("\n")
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return current
 
 
 def reset_config():
         """Remove the saved configuration, returning the previous output folder."""
         previous = None
         try:
-            previous = saved_output()
+            previous = load_config().get("output")
         except DownloadError:
             previous = None
         path = config_path()
@@ -115,21 +142,18 @@ def reset_config():
         return previous or "Downloads"
 
 
-def _write_config(data):
-        path = config_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                             prefix="config-", suffix=".tmp", delete=False) as handle:
-                temporary = Path(handle.name)
-                json.dump(data, handle, indent=2)
-                handle.write("\n")
-            temporary.replace(path)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-        return data["output"]
+def saved_output():
+    return load_config()["output"]
+
+
+def save_output(folder):
+        if not folder.strip():
+            raise DownloadError("The output folder cannot be empty.")
+        destination = Path(folder).expanduser().resolve()
+        if destination.exists() and not destination.is_dir():
+            raise DownloadError(f"The output path is a file, not a folder: {destination}")
+        save_config(output=str(destination))
+        return str(destination)
 
 
 def clean_text(value):
@@ -339,7 +363,9 @@ class Jiosaavn:
     def __init__(self, output="Downloads", quality="320", timeout=30,
                  overwrite=False, lyrics=True, cover=True, session=None,
                  quiet=False, verbose=False, dry_run=False, workers=COLLECTION_WORKERS,
-                 genre=None, template=None):
+                 genre=None, template=None, max_speed=None, proxy=None,
+                 incremental=False, fallback_qualities=None, save_lyrics_file=False,
+                 save_cover_file=False, post_hook=None):
         self.output = Path(output).expanduser()
         self.genre = normalize_genre(genre)
         self.workers = max(1, min(int(workers), MAX_WORKERS))
@@ -352,6 +378,13 @@ class Jiosaavn:
         self.verbose = verbose
         self.dry_run = dry_run
         self.template = template
+        self.max_speed = max_speed  # bytes/sec, None = unlimited
+        self.proxy = proxy
+        self.incremental = incremental
+        self.fallback_qualities = fallback_qualities or []
+        self.save_lyrics_file = save_lyrics_file
+        self.save_cover_file = save_cover_file
+        self.post_hook = post_hook
         self.progress_enabled = False
         self._progress_lock = threading.Lock()
         self._progress_total = 0
@@ -542,12 +575,13 @@ class Jiosaavn:
             self._active_amount.pop(pos, None)
         self._emit(f"  [{pos}/{total}] Failed: {title or f'track {pos}'} — {exc}", sys.stderr)
 
-    @staticmethod
-    def _configure_session(session):
+    def _configure_session(self, session):
         retries = _RetryWithRetryAfter(total=3, backoff_factor=0.5,
                                        status_forcelist=(429, 500, 502, 503, 504),
                                        allowed_methods=frozenset(("GET",)))
         session.mount("https://", HTTPAdapter(max_retries=retries))
+        if self.proxy:
+            session.proxies = {"http": self.proxy, "https": self.proxy}
 
     def _new_session(self):
         session = requests.Session()
@@ -673,23 +707,48 @@ class Jiosaavn:
                 break
         return supported
 
-    def getCdnURL(self, encurl):
-        data = self.api("song.generateAuthToken", url=encurl,
-                        bitrate=self.quality, api_version="4")
-        url = data.get("auth_url")
-        if not isinstance(url, str) or not url.startswith(("https://", "http://")):
-            raise DownloadError("No audio URL is available for this track.")
-        # The web endpoint sometimes returns its web stream instead of AAC.
-        # Known host patterns: web.* -> aac.*, or return as-is if already aac/cdn
-        parts = urlsplit(url)
-        host = parts.netloc
-        if host.startswith("web."):
-            host = "aac." + host[4:]
-        elif "web" in host:
-            # Fallback: replace first occurrence of "web" with "aac"
-            host = host.replace("web", "aac", 1)
-        # If host didn't change, assume it's already a direct CDN URL
-        return parts._replace(netloc=host).geturl()
+    def getCdnURL(self, encurl, fallback_qualities=None):
+        """Get CDN URL for a track, with optional quality fallback.
+
+        Args:
+            encurl: Encrypted media URL from JioSaavn
+            fallback_qualities: List of quality strings to try in order (e.g. ["320", "160", "96"])
+                               If None, uses self.quality only.
+        """
+        qualities = [self.quality] if fallback_qualities is None else [self.quality] + fallback_qualities
+        # Deduplicate while preserving order
+        seen = set()
+        qualities = [q for q in qualities if not (q in seen or seen.add(q))]
+
+        last_error = None
+        for quality in qualities:
+            try:
+                data = self.api("song.generateAuthToken", url=encurl,
+                                bitrate=quality, api_version="4")
+                url = data.get("auth_url")
+                if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                    raise DownloadError("No audio URL is available for this track.")
+                # The web endpoint sometimes returns its web stream instead of AAC.
+                # Known host patterns: web.* -> aac.*, or return as-is if already aac/cdn
+                parts = urlsplit(url)
+                host = parts.netloc
+                if host.startswith("web."):
+                    host = "aac." + host[4:]
+                elif "web" in host:
+                    # Fallback: replace first occurrence of "web" with "aac"
+                    host = host.replace("web", "aac", 1)
+                # If host didn't change, assume it's already a direct CDN URL
+                if quality != self.quality:
+                    self._warning(f"  Falling back to {quality} kbps (requested {self.quality} kbps unavailable)")
+                return parts._replace(netloc=host).geturl()
+            except DownloadError as exc:
+                last_error = exc
+                if "unavailable" in str(exc).lower() or "not available" in str(exc).lower():
+                    continue  # Try next quality
+                raise  # Other errors (auth, etc.) - don't fallback
+
+        # All qualities exhausted
+        raise DownloadError(f"No audio URL available at any quality (tried: {', '.join(qualities)}). Last error: {last_error}")
 
     def _template_values(self, song, artists, isPlaylist, song_pos):
         """Build the placeholder map for the output template."""
@@ -849,12 +908,31 @@ class Jiosaavn:
             if length and length.isdigit():
                 total_size = saved_before + int(length)
         with temp.open("ab" if append else "wb") as handle:
+            last_time = time.monotonic()
+            bytes_since_throttle = 0
             for chunk in response.iter_content(chunk_size=128 * 1024):
                 if chunk:
                     handle.write(chunk)
                     size += len(chunk)
                     if progress:
                         progress(saved_before + size, total_size)
+
+                    # Throttle download speed if max_speed is set
+                    if self.max_speed:
+                        bytes_since_throttle += len(chunk)
+                        now = time.monotonic()
+                        elapsed = now - last_time
+                        if elapsed > 0:
+                            current_rate = bytes_since_throttle / elapsed
+                            if current_rate > self.max_speed:
+                                # Sleep to throttle
+                                target_time = bytes_since_throttle / self.max_speed
+                                sleep_time = target_time - elapsed
+                                if sleep_time > 0:
+                                    time.sleep(sleep_time)
+                        # Reset counters after each chunk to avoid accumulation
+                        last_time = time.monotonic()
+                        bytes_since_throttle = 0
         if not size:
             if not offset:
                 temp.unlink(missing_ok=True)
@@ -905,11 +983,45 @@ class Jiosaavn:
             value = clean_text(song.get(key))
             if value:
                 audio[f"----:com.apple.iTunes:{label}"] = value.encode("utf-8")
+
+        # Add ISRC if available
+        isrc = clean_text(song.get("isrc"))
+        if isrc:
+            audio["----:com.apple.iTunes:ISRC"] = isrc.encode("utf-8")
+
+        # Add disc number if available
+        disc_number = song.get("disc_number") or song.get("disc")
+        if disc_number:
+            try:
+                disc_num = int(disc_number)
+                # MP4 uses disk number as a tuple (disc_number, total_discs)
+                total_discs = song.get("total_discs") or 1
+                try:
+                    total_discs = int(total_discs)
+                except (ValueError, TypeError):
+                    total_discs = 1
+                audio["disk"] = [(disc_num, total_discs)]
+            except (ValueError, TypeError):
+                pass
+
+        # Add compilation flag if available
+        compilation = song.get("compilation") or song.get("is_compilation")
+        if is_true(compilation):
+            audio["cpil"] = [1]
+
         if self.lyrics and is_true(song.get("has_lyrics")) and song.get("id"):
             try:
                 lyrics = self.api("lyrics.getLyrics", lyrics_id=song["id"], api_version="4")
                 if lyrics.get("lyrics"):
-                    audio["\xa9lyr"] = clean_text(re.sub(r"<br\s*/?>", "\n", lyrics["lyrics"]))
+                    lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", lyrics["lyrics"]))
+                    audio["\xa9lyr"] = lyrics_text
+                    # Save lyrics as separate .lrc file if requested
+                    if self.save_lyrics_file:
+                        lrc_path = song_path.with_suffix(".lrc")
+                        try:
+                            lrc_path.write_text(lyrics_text, encoding="utf-8")
+                        except OSError as exc:
+                            self._warning(f"  Warning: Could not save lyrics file: {exc}")
             except Exception as exc:
                 # Catch all exceptions (API errors, malformed response, regex errors)
                 # so lyrics failure never prevents track download
@@ -1094,7 +1206,7 @@ class Jiosaavn:
         if not encrypted:
             raise DownloadError("Audio is unavailable for this track (it may be restricted in your region).")
         directory.mkdir(parents=True, exist_ok=True)
-        audio_url = self.getCdnURL(encrypted)
+        audio_url = self.getCdnURL(encrypted, fallback_qualities=self.fallback_qualities)
         artwork = None
         if self.cover and song.get("image"):
             try:
@@ -1103,6 +1215,13 @@ class Jiosaavn:
                     artwork = response.content
                 if not artwork.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")):
                     raise DownloadError("Invalid cover image.")
+                # Save cover art as folder.jpg if requested
+                if self.save_cover_file:
+                    cover_path = directory / "folder.jpg"
+                    try:
+                        cover_path.write_bytes(artwork)
+                    except OSError as exc:
+                        self._warning(f"  Warning: Could not save cover file: {exc}")
             except DownloadError as exc:
                 artwork = None
                 self._warning(f"  Warning: cover unavailable: {exc}")
@@ -1122,6 +1241,14 @@ class Jiosaavn:
             temp.unlink(missing_ok=True)
         self._increment_counter("downloaded")
         self._status(f"  Saved: {destination}", verbose_only=self.progress_enabled)
+        # Execute post-hook if configured
+        if self.post_hook:
+            try:
+                import subprocess
+                subprocess.run(self.post_hook, shell=True, check=False,
+                               env={**os.environ, "JIOSAAVN_FILE": str(destination)})
+            except Exception as exc:
+                self._warning(f"  Warning: post-hook failed: {exc}")
 
     def _process_collection_track(self, kind, data, name, pos, total, song):
         self._worker_local.title = None
@@ -1154,6 +1281,45 @@ class Jiosaavn:
                 print(f"  Error on track {pos}: {exc}", file=sys.stderr)
         finally:
             self._advance_progress(pos)
+
+    def _filter_existing_tracks(self, songs, kind):
+        """Filter out tracks that already exist based on song ID.
+        Returns list of songs that don't exist yet."""
+        if not songs:
+            return songs
+
+        # Collect all unique folders that would be used for these tracks
+        # We need to check each track's destination folder
+        filtered = []
+        for song in songs:
+            track_id = clean_text(song.get("id") or song.get("perma_url", "").split("/")[-1])
+            if not track_id:
+                # Can't determine ID, keep the track
+                filtered.append(song)
+                continue
+
+            # We need to check if this track ID exists anywhere in the output directory
+            # Since we don't know the exact folder without processing the track,
+            # we'll do a broad search across all subdirectories
+            found = False
+            try:
+                for folder in self.output.iterdir():
+                    if not folder.is_dir():
+                        continue
+                    for existing_file in folder.glob("*.m4a"):
+                        existing_id = self._tagged_song_id(existing_file)
+                        if existing_id == track_id:
+                            found = True
+                            break
+                    if found:
+                        break
+            except OSError:
+                pass
+
+            if not found:
+                filtered.append(song)
+
+        return filtered
 
     def process_collection(self, kind, token):
         if kind not in ("album", "playlist"):
@@ -1209,6 +1375,17 @@ class Jiosaavn:
         self._status(f"{kind.title()}: {name} ({len(songs)} tracks)")
         if reported_total > len(songs):
             self._warning(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.")
+
+        # Incremental sync: filter out tracks that already exist
+        if self.incremental and kind == "playlist":
+            original_count = len(songs)
+            songs = self._filter_existing_tracks(songs, kind)
+            if len(songs) < original_count:
+                self._status(f"Incremental sync: {original_count - len(songs)} tracks already exist, {len(songs)} new tracks to download")
+            if not songs:
+                self._status("No new tracks to download.")
+                return
+
         try:
             self._start_progress(len(songs), collection_started_at)
             with ThreadPoolExecutor(max_workers=min(self.workers, len(songs))) as executor:

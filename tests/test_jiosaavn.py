@@ -1394,7 +1394,7 @@ class CliTests(unittest.TestCase):
                                 'encrypted_media_url': 'enc-' + token}]}
                     if kind == 'song' else collection))
 
-                def cdn(encrypted):
+                def cdn(encrypted, **kwargs):
                     if encrypted.endswith('token2'):
                         raise core.DownloadError('Audio is unavailable')
                     return 'https://aac.example/song.m4a'
