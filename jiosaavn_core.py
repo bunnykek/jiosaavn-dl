@@ -220,7 +220,11 @@ def resolve_url(url, client):
         return parse_url(url)
     # App sharing links require a redirect to reveal the collection type/token.
     # Follow only recognized hosts, with a bound independent of Session defaults.
+    visited = set()
     for _ in range(6):
+        if url in visited:
+            raise DownloadError("Redirect loop detected in share link. Copy its full website URL instead.")
+        visited.add(url)
         with client.request(url, stream=True, allow_redirects=False) as response:
             if response.status_code not in (301, 302, 303, 307, 308):
                 raise DownloadError("This share link did not redirect to a song, album, or playlist. Copy its full website URL instead.")
