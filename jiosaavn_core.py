@@ -1244,11 +1244,11 @@ class Jiosaavn:
         # Execute post-hook if configured
         if self.post_hook:
             try:
-                import subprocess
+                import subprocess  # nosec B404
                 import shlex
                 # Use shlex.split to safely parse the command without shell=True
                 cmd = shlex.split(self.post_hook)
-                subprocess.run(cmd, shell=False, check=False,
+                subprocess.run(cmd, shell=False, check=False,  # nosec B603
                                env={**os.environ, "JIOSAAVN_FILE": str(destination)})
             except Exception as exc:
                 self._warning(f"  Warning: post-hook failed: {exc}")
