@@ -23,6 +23,24 @@ from sanitize_filename import sanitize
 from mutagen import MutagenError
 from mutagen.mp4 import MP4, MP4Cover
 
+
+class _RetryWithRetryAfter(Retry):
+    """Retry class that respects Retry-After header for 429 responses."""
+    def increment(self, method, url, response=None, _pool=None, _stacktrace=None):
+        # Check for Retry-After on 429
+        if response is not None and response.status == 429:
+            retry_after = self.get_retry_after(response)
+            if retry_after is not None:
+                # Create a new Retry with the specific backoff
+                new_retry = self.new(
+                    total=self.total - 1,
+                    backoff_factor=retry_after,
+                    status_forcelist=self.status_forcelist,
+                    allowed_methods=self.allowed_methods,
+                )
+                return new_retry.increment(method, url, response, _pool, _stacktrace)
+        return super().increment(method, url, response, _pool, _stacktrace)
+
 API_URL = "https://www.jiosaavn.com/api.php"
 COLLECTION_PAGE_SIZE = 1000
 COLLECTION_WORKERS = 4  # default number of tracks downloaded at once
@@ -269,14 +287,32 @@ def display_width(text):
     """Approximate number of terminal columns `text` occupies.
 
     Wide (CJK) characters count as 2; combining marks and control characters
-    count as 0. When unsure it errs on the wide side, so a line that is cut to
-    fit never wraps and breaks the progress redraw.
+    count as 0. Emoji ZWJ sequences (e.g. 👨‍👩‍👧‍👦, 👩‍❤️‍👩) count as 2 columns total.
+    When unsure it errs on the wide side, so a line that is cut to fit never
+    wraps and breaks the progress redraw.
     """
     width = 0
+    in_zwj_sequence = False
     for char in text:
-        if unicodedata.category(char) in ("Mn", "Me", "Cf", "Cc"):
+        cat = unicodedata.category(char)
+        if cat in ("Mn", "Me", "Cc"):
             continue
-        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        if cat == "Cf":  # Format characters (includes ZWJ U+200D)
+            # ZWJ continues an emoji sequence; don't add width
+            in_zwj_sequence = True
+            continue
+        # Check if this is an emoji (Symbol, Other category)
+        is_emoji = cat == "So"
+        if is_emoji and in_zwj_sequence:
+            # Part of ZWJ sequence; already counted the first emoji
+            in_zwj_sequence = False
+            continue
+        char_width = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        width += char_width
+        if is_emoji:
+            in_zwj_sequence = True  # Next ZWJ+emoji will be skipped
+        else:
+            in_zwj_sequence = False
     return width
 
 
@@ -508,9 +544,9 @@ class Jiosaavn:
 
     @staticmethod
     def _configure_session(session):
-        retries = Retry(total=3, backoff_factor=0.5,
-                        status_forcelist=(429, 500, 502, 503, 504),
-                        allowed_methods=frozenset(("GET",)))
+        retries = _RetryWithRetryAfter(total=3, backoff_factor=0.5,
+                                       status_forcelist=(429, 500, 502, 503, 504),
+                                       allowed_methods=frozenset(("GET",)))
         session.mount("https://", HTTPAdapter(max_retries=retries))
 
     def _new_session(self):
@@ -550,9 +586,34 @@ class Jiosaavn:
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
-                start, end = text.find("{"), text.rfind("}")
-                if start < 0 or end < start:
+                # Extract first complete JSON object (handles nested objects)
+                start = text.find("{")
+                if start < 0:
                     raise ValueError("No JSON object in response")
+                depth = 0
+                in_string = False
+                escape = False
+                end = -1
+                for i, ch in enumerate(text[start:], start):
+                    if escape:
+                        escape = False
+                        continue
+                    if ch == "\\":
+                        escape = True
+                        continue
+                    if ch == '"' and not escape:
+                        in_string = not in_string
+                        continue
+                    if not in_string:
+                        if ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                end = i
+                                break
+                if end < 0:
+                    raise ValueError("No complete JSON object in response")
                 data = json.loads(text[start:end + 1])
         except (ValueError, TypeError) as exc:
             raise DownloadError("JioSaavn returned an unreadable response. Try again later.") from exc
@@ -619,8 +680,15 @@ class Jiosaavn:
         if not isinstance(url, str) or not url.startswith(("https://", "http://")):
             raise DownloadError("No audio URL is available for this track.")
         # The web endpoint sometimes returns its web stream instead of AAC.
+        # Known host patterns: web.* -> aac.*, or return as-is if already aac/cdn
         parts = urlsplit(url)
-        host = parts.netloc.replace("web", "aac", 1)
+        host = parts.netloc
+        if host.startswith("web."):
+            host = "aac." + host[4:]
+        elif "web" in host:
+            # Fallback: replace first occurrence of "web" with "aac"
+            host = host.replace("web", "aac", 1)
+        # If host didn't change, assume it's already a direct CDN URL
         return parts._replace(netloc=host).geturl()
 
     def _template_values(self, song, artists, isPlaylist, song_pos):
@@ -666,6 +734,10 @@ class Jiosaavn:
         """
         return path.with_name(f"{path.name}.{self.quality}.part")
 
+    def _partial_meta_path(self, path):
+        """Sidecar file storing ETag/Content-MD5 for resume validation."""
+        return self.partial_path(path).with_suffix(".part.meta")
+
     @staticmethod
     def _discard_partials(path):
         """Delete leftover partial downloads of `path` at any quality."""
@@ -673,6 +745,9 @@ class Jiosaavn:
         for partial in path.parent.glob("*.part"):
             if partial.name.startswith(prefix):
                 partial.unlink(missing_ok=True)
+                # Also remove sidecar meta file
+                meta = partial.with_suffix(".part.meta")
+                meta.unlink(missing_ok=True)
 
     def download_file(self, url, path, progress=None):
         """Resume a partial stream into a temporary file.
@@ -680,9 +755,24 @@ class Jiosaavn:
         `progress(done, total)`, if given, is called after each chunk with the
         bytes saved so far (including a resumed prefix) and the full file size,
         or None when the server does not say how large the file is.
+
+        Validates ETag/Content-MD5 on resume to prevent corrupted spliced files.
         """
         temp = self.partial_path(path)
+        meta_path = self._partial_meta_path(path)
         offset = temp.stat().st_size if temp.exists() else 0
+
+        # Load stored validators for resume validation
+        stored_etag = stored_md5 = None
+        if offset and meta_path.exists():
+            try:
+                import json
+                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                stored_etag = data.get("etag")
+                stored_md5 = data.get("md5")
+            except (OSError, json.JSONDecodeError):
+                pass  # Corrupt/missing meta; will restart
+
         for attempt in range(2):
             request_options = {"stream": True}
             if offset:
@@ -695,18 +785,37 @@ class Jiosaavn:
                     if response.status_code == 416:
                         if attempt == 0 and offset:
                             temp.unlink(missing_ok=True)
+                            meta_path.unlink(missing_ok=True)
                             offset = 0
                             continue
                         raise DownloadError(
                             "The server rejected the download range twice; "
                             "the stale partial download was discarded. Retry the track."
                         )
-                    return self._save_response(temp, response, offset, progress)
+
+                    # Validate ETag/Content-MD5 on resume (206 Partial Content)
+                    if offset and response.status_code == 206:
+                        current_etag = response.headers.get("ETag", "").strip('"')
+                        current_md5 = response.headers.get("Content-MD5", "")
+                        if stored_etag and current_etag and stored_etag != current_etag:
+                            self._warning("  ETag mismatch on resume; restarting download.")
+                            temp.unlink(missing_ok=True)
+                            meta_path.unlink(missing_ok=True)
+                            offset = 0
+                            continue
+                        if stored_md5 and current_md5 and stored_md5 != current_md5:
+                            self._warning("  Content-MD5 mismatch on resume; restarting download.")
+                            temp.unlink(missing_ok=True)
+                            meta_path.unlink(missing_ok=True)
+                            offset = 0
+                            continue
+
+                    return self._save_response(temp, response, offset, progress, meta_path)
             except requests.RequestException as exc:
                 raise DownloadError(f"Download interrupted: {exc}") from exc
         raise DownloadError("The download could not be started.")
 
-    def _save_response(self, temp, response, offset, progress):
+    def _save_response(self, temp, response, offset, progress, meta_path=None):
         content_type = response.headers.get("Content-Type", "").lower()
         if "text/" in content_type or "json" in content_type:
             raise DownloadError("The server returned an error page instead of media.")
@@ -717,14 +826,20 @@ class Jiosaavn:
             match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
             if not match or int(match.group(1)) != offset or int(match.group(2)) < offset:
                 temp.unlink(missing_ok=True)
+                if meta_path:
+                    meta_path.unlink(missing_ok=True)
                 raise DownloadError("The server returned an invalid range response.")
             if match.group(3) != "*":
                 expected_total = int(match.group(3))
                 if int(match.group(2)) >= expected_total:
                     temp.unlink(missing_ok=True)
+                    if meta_path:
+                        meta_path.unlink(missing_ok=True)
                     raise DownloadError("The server returned an invalid range response.")
             if response.headers.get("Content-Encoding", "").lower() not in ("", "identity"):
                 temp.unlink(missing_ok=True)
+                if meta_path:
+                    meta_path.unlink(missing_ok=True)
                 raise DownloadError("The server encoded a ranged response; retry without resuming.")
         size = 0
         saved_before = offset if append else 0
@@ -743,6 +858,8 @@ class Jiosaavn:
         if not size:
             if not offset:
                 temp.unlink(missing_ok=True)
+                if meta_path:
+                    meta_path.unlink(missing_ok=True)
             raise DownloadError("The server returned an empty file.")
         expected = response.headers.get("Content-Length")
         if expected and expected.isdigit() and not response.headers.get("Content-Encoding"):
@@ -750,6 +867,18 @@ class Jiosaavn:
                 raise DownloadError("Download was incomplete. Please retry.")
         if expected_total is not None and temp.stat().st_size != expected_total:
             raise DownloadError("Download was incomplete. Please retry.")
+
+        # Store ETag/Content-MD5 for future resume validation
+        if meta_path and not append:  # Only on fresh start (200 OK), not on resume
+            etag = response.headers.get("ETag", "").strip('"')
+            md5 = response.headers.get("Content-MD5", "")
+            if etag or md5:
+                import json
+                try:
+                    meta_path.write_text(json.dumps({"etag": etag, "md5": md5}), encoding="utf-8")
+                except OSError:
+                    pass  # Non-fatal
+
         return temp
 
     def tagger(self, song, song_path, album_artist=None, pos=1, total=1, artwork=None,
