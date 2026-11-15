@@ -1245,7 +1245,10 @@ class Jiosaavn:
         if self.post_hook:
             try:
                 import subprocess
-                subprocess.run(self.post_hook, shell=True, check=False,
+                import shlex
+                # Use shlex.split to safely parse the command without shell=True
+                cmd = shlex.split(self.post_hook)
+                subprocess.run(cmd, shell=False, check=False,
                                env={**os.environ, "JIOSAAVN_FILE": str(destination)})
             except Exception as exc:
                 self._warning(f"  Warning: post-hook failed: {exc}")
