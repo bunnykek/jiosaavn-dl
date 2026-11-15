@@ -1003,9 +1003,10 @@ class Jiosaavn:
             if (not self.dry_run and not self._provided_session
                     and not hasattr(self._worker_local, "session")):
                 worker_session = self._new_session()
-                self._worker_local.session = worker_session
+                # Track session immediately to ensure cleanup on any exception
                 with self._worker_sessions_lock:
                     self._worker_sessions.append(worker_session)
+                self._worker_local.session = worker_session
             self.processTrack(track_token,
                               data.get("primary_artists") if kind == "album" else None,
                               pos, total, f"Playlist - {name}" if kind == "playlist" else False,
@@ -1063,25 +1064,22 @@ class Jiosaavn:
             self._warning(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.")
         try:
             self._start_progress(len(songs), collection_started_at)
-            executor = ThreadPoolExecutor(max_workers=min(self.workers, len(songs)))
-            futures = []
-            try:
-                for pos, song in enumerate(songs, 1):
-                    futures.append(executor.submit(
-                        self._process_collection_track,
-                        kind, data, name, pos, len(songs), song))
-                for future in as_completed(futures):
-                    future.result()
-            except BaseException:
-                # Cancel queued tracks on interruption or an unexpected worker error.
-                # Running requests finish within their configured timeout before
-                # their sessions are closed in the outer finally block.
-                for future in futures:
-                    future.cancel()
-                executor.shutdown(wait=True, cancel_futures=True)
-                raise
-            else:
-                executor.shutdown(wait=True)
+            with ThreadPoolExecutor(max_workers=min(self.workers, len(songs))) as executor:
+                futures = []
+                try:
+                    for pos, song in enumerate(songs, 1):
+                        futures.append(executor.submit(
+                            self._process_collection_track,
+                            kind, data, name, pos, len(songs), song))
+                    for future in as_completed(futures):
+                        future.result()
+                except BaseException:
+                    # Cancel queued tracks on interruption or an unexpected worker error.
+                    # Running requests finish within their configured timeout before
+                    # their sessions are closed in the outer finally block.
+                    for future in futures:
+                        future.cancel()
+                    raise
         finally:
             self._finish_progress()
             with self._worker_sessions_lock:
