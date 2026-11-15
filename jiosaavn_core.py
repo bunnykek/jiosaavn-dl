@@ -72,25 +72,46 @@ def saved_output():
 
 
 def save_output(folder):
-    if not folder.strip():
-        raise DownloadError("The output folder cannot be empty.")
-    destination = Path(folder).expanduser().resolve()
-    if destination.exists() and not destination.is_dir():
-        raise DownloadError(f"The output path is a file, not a folder: {destination}")
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                         prefix="config-", suffix=".tmp", delete=False) as handle:
-            temporary = Path(handle.name)
-            json.dump({"output": str(destination)}, handle, indent=2)
-            handle.write("\n")
-        temporary.replace(path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return str(destination)
+        if not folder.strip():
+            raise DownloadError("The output folder cannot be empty.")
+        destination = Path(folder).expanduser().resolve()
+        if destination.exists() and not destination.is_dir():
+            raise DownloadError(f"The output path is a file, not a folder: {destination}")
+        return _write_config({"output": str(destination)})
+
+
+def reset_config():
+        """Remove the saved configuration, returning the previous output folder."""
+        previous = None
+        try:
+            previous = saved_output()
+        except DownloadError:
+            previous = None
+        path = config_path()
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise DownloadError(f"Cannot remove settings at {path}: {exc}.") from exc
+        return previous or "Downloads"
+
+
+def _write_config(data):
+        path = config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                             prefix="config-", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                json.dump(data, handle, indent=2)
+                handle.write("\n")
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return data["output"]
 
 
 def clean_text(value):
@@ -968,8 +989,8 @@ class Jiosaavn:
         self._status(f"  Saved: {destination}", verbose_only=self.progress_enabled)
 
     def _process_collection_track(self, kind, data, name, pos, total, song):
-        self._worker_local.title = None
-        retry_url = None  # set once the item is known to be a retryable song URL
+        retry_url = None
+        track_title = None
         try:
             if not isinstance(song, dict) or not song.get("perma_url"):
                 raise DownloadError("Track is missing its URL.")
@@ -977,6 +998,8 @@ class Jiosaavn:
             if track_kind != "song":
                 raise DownloadError("Collection item is not a song URL.")
             retry_url = song["perma_url"]
+            # Extract title early for error reporting (avoids thread-local race)
+            track_title = clean_text(song.get("song")) or track_token
             if (not self.dry_run and not self._provided_session
                     and not hasattr(self._worker_local, "session")):
                 worker_session = self._new_session()
@@ -988,8 +1011,7 @@ class Jiosaavn:
                               pos, total, f"Playlist - {name}" if kind == "playlist" else False,
                               song_data=song)
         except Exception as exc:
-            title = self._worker_local.title
-            label = f"{title} (track {pos} of {name})" if title else f"Track {pos} of {name}"
+            label = f"{track_title} (track {pos} of {name})" if track_title else f"Track {pos} of {name}"
             self.record_failure(label, exc, retry_url)
             if self._progress_active:
                 self._track_failed(pos, total, exc)
@@ -1066,6 +1088,8 @@ class Jiosaavn:
                 worker_sessions, self._worker_sessions = self._worker_sessions, []
             for worker_session in worker_sessions:
                 worker_session.close()
+            # Clear folder index cache to prevent memory leak across collections
+            self._folder_ids.clear()
 
     def processAlbum(self, album_id):
         self.process_collection("album", album_id)

@@ -70,13 +70,15 @@ jiosaavn-dl --help
 Save a default download folder once, for example a folder inside your music library:
 
 ```sh
-jiosaavn-dl --set-output ~/Music/JioSaavn
+jiosaavn-dl config set "$HOME/Music/JioSaavn"
 jiosaavn-dl 'URL'
 ```
 
-Future downloads go into that folder, even when you run the command from another directory. Use quotes for folder names containing spaces, such as `--set-output "$HOME/Music/My Library"`. On Windows, use `--set-output "C:\Users\YourName\Music\JioSaavn"`.
+Future downloads go into that folder, even when you run the command from another directory. Use quotes for folder names containing spaces. On Windows, use `jiosaavn-dl config set "C:\Users\YourName\Music\JioSaavn"`.
 
-For a single download, choose a different location with `jiosaavn-dl 'URL' -o /path/to/folder`. This does not change your saved default. Run `jiosaavn-dl --show-output` to see the current destination. New download folders are created when tracks are saved, with album and playlist subfolders inside them.
+`config show` prints the effective download folder, and `config reset` removes the saved folder so downloads fall back to `./Downloads` again. These commands can run without a URL.
+
+For a single download, choose a different location with `jiosaavn-dl 'URL' -o /path/to/folder`. This does not change your saved default. Run `jiosaavn-dl config show` to see the current destination. New download folders are created when tracks are saved, with album and playlist subfolders inside them.
 
 Settings are saved in `~/Library/Application Support/jiosaavn-dl/config.json` on macOS, `%APPDATA%\jiosaavn-dl\config.json` on Windows, or `~/.config/jiosaavn-dl/config.json` on Linux. `XDG_CONFIG_HOME`, when set, overrides the configuration directory. Without a saved setting, downloads still go to `./Downloads`. Choosing a folder saves audio files there; it does not automatically import them into a music player.
 
