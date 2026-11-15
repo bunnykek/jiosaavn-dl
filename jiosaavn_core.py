@@ -456,6 +456,50 @@ class Jiosaavn:
             params["p"] = page
         return self.api("webapi.get", **params)
 
+    def search(self, query, limit=10):
+        """Search songs, albums, and playlists, returning supported public URLs."""
+        query = str(query).strip()
+        if not query:
+            raise DownloadError("Search query cannot be blank.")
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError) as exc:
+            raise DownloadError("Search result limit must be a positive integer.") from exc
+        if limit < 1 or limit > 50:
+            raise DownloadError("Search result limit must be between 1 and 50.")
+
+        data = self.api("search.getResults", q=query, p=1, n=limit)
+        results = data.get("results")
+        if not isinstance(results, list):
+            raise DownloadError("JioSaavn returned an unsupported search response.")
+
+        supported = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            raw_url = result.get("perma_url") or result.get("url")
+            if not isinstance(raw_url, str) or not raw_url.strip():
+                continue
+            raw_url = raw_url.strip()
+            if raw_url.startswith("/"):
+                raw_url = "https://www.jiosaavn.com" + raw_url
+            try:
+                url = normalized_url(raw_url)
+                kind, _ = parse_url(url)
+            except (DownloadError, ValueError):
+                continue
+            if kind not in ("song", "album", "playlist"):
+                continue
+            title = clean_text(result.get("title") or result.get("song")
+                               or result.get("album") or "Untitled")
+            subtitle = clean_text(result.get("subtitle") or result.get("primary_artists")
+                                  or result.get("singers") or "")
+            supported.append({"kind": kind, "url": url, "title": title,
+                              "subtitle": subtitle})
+            if len(supported) >= limit:
+                break
+        return supported
+
     def getCdnURL(self, encurl):
         data = self.api("song.generateAuthToken", url=encurl,
                         bitrate=self.quality, api_version="4")

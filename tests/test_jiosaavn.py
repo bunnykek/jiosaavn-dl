@@ -150,6 +150,26 @@ class ClientTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(app.DownloadError):
                 self.client.metadata('song', 'id')
 
+    def test_search_normalizes_supported_results_and_skips_unsupported_urls(self):
+        self.client.api = Mock(return_value={"results": [
+            {"type": "song", "perma_url": "/song/title/song-token", "song": "A &amp; B",
+             "primary_artists": "Artist"},
+            {"type": "artist", "url": "https://www.jiosaavn.com/artist/name/token"},
+            {"type": "album", "url": "https://evil.example/album/name/token"},
+        ]})
+        self.assertEqual(self.client.search("  A & B  "), [{
+            "kind": "song", "url": "https://www.jiosaavn.com/song/title/song-token",
+            "title": "A & B", "subtitle": "Artist",
+        }])
+        self.client.api.assert_called_once_with("search.getResults", q="A & B", p=1, n=10)
+
+    def test_search_rejects_blank_query_and_invalid_response(self):
+        with self.assertRaisesRegex(app.DownloadError, "cannot be blank"):
+            self.client.search("  ")
+        self.client.api = Mock(return_value={"results": {}})
+        with self.assertRaisesRegex(app.DownloadError, "unsupported search response"):
+            self.client.search("title")
+
     def test_http_errors(self):
         self.session.get.return_value.raise_for_status.side_effect = requests.HTTPError('403')
         with self.assertRaises(app.DownloadError):
@@ -926,6 +946,51 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.api.call_args.kwargs['bitrate'], '320')
 
 
+class InteractiveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.client = Mock(output=Path(self.temp.name), quality="320", overwrite=False)
+        self.client.search.return_value = [
+            {"kind": "song", "title": "Song One", "subtitle": "Artist",
+             "url": "https://www.jiosaavn.com/song/one/token1"},
+            {"kind": "album", "title": "Album Two", "subtitle": "Artist",
+             "url": "https://www.jiosaavn.com/album/two/token2"},
+        ]
+
+    def test_selection_and_settings_flow(self):
+        answers = iter(("artist", "9", "2,1", "", "invalid", "160", "y", "yes"))
+        output = io.StringIO()
+        selected = app.interactive_setup(self.client, lambda _prompt: next(answers),
+                                         lambda line: output.write(line + "\n"))
+        self.assertEqual(selected, [
+            "https://www.jiosaavn.com/album/two/token2",
+            "https://www.jiosaavn.com/song/one/token1",
+        ])
+        self.assertEqual(self.client.quality, "160")
+        self.assertTrue(self.client.overwrite)
+        self.assertIn("Choose numbers from 1 to 2", output.getvalue())
+        self.assertIn("Choose 12, 48, 96, 160, or 320 kbps", output.getvalue())
+
+    def test_empty_search_retries_query_and_selection_can_choose_all(self):
+        self.client.search.side_effect = [[], self.client.search.return_value]
+        answers = iter(("missing", "artist", "all", "", "", "n", "y"))
+        output = io.StringIO()
+        selected = app.interactive_setup(self.client, lambda _prompt: next(answers),
+                                         lambda line: output.write(line + "\n"))
+        self.assertEqual(len(selected), 2)
+        self.assertFalse(self.client.overwrite)
+        self.assertIn("No supported songs", output.getvalue())
+        self.assertEqual(self.client.search.call_count, 2)
+
+    def test_cancel_at_query_or_final_confirmation_does_not_select(self):
+        self.assertIsNone(app.interactive_setup(
+            self.client, lambda _prompt: "q", lambda _line: None))
+        answers = iter(("artist", "1", "", "", "", "n"))
+        self.assertIsNone(app.interactive_setup(
+            self.client, lambda _prompt: next(answers), lambda _line: None))
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
@@ -945,6 +1010,38 @@ class CliTests(unittest.TestCase):
             self.assertEqual(client.process_collection.call_args_list,
                              [unittest.mock.call('album', 'album-token'),
                               unittest.mock.call('playlist', 'playlist-token')])
+
+    def test_interactive_requires_tty(self):
+        stdin = Mock()
+        stdin.isatty.return_value = False
+        with patch.object(app.sys, 'stdin', stdin), contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(app.main(['--interactive']), 2)
+        self.assertIn('requires an interactive terminal', errors.getvalue())
+
+    def test_interactive_selection_uses_existing_download_dispatch(self):
+        stdin = Mock()
+        stdin.isatty.return_value = True
+        with patch.object(app.sys, 'stdin', stdin), patch.object(app, 'interactive_setup',
+                return_value=[URL]), patch.object(app, 'resolve_url', return_value=('song', 'token')), \
+                patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+            client = cls.return_value
+            client.downloaded = client.skipped = client.failed = 0
+            client.failures = []
+            self.assertEqual(app.main(['--interactive']), 0)
+            client.processTrack.assert_called_once_with('token')
+            client.session.close.assert_called_once()
+
+    def test_interactive_cancel_closes_session_without_download(self):
+        stdin = Mock()
+        stdin.isatty.return_value = True
+        with patch.object(app.sys, 'stdin', stdin), patch.object(app, 'interactive_setup',
+                return_value=None), patch.object(app, 'Jiosaavn') as cls, \
+                contextlib.redirect_stdout(io.StringIO()):
+            client = cls.return_value
+            self.assertEqual(app.main(['--interactive']), 0)
+            client.processTrack.assert_not_called()
+            client.process_collection.assert_not_called()
+            client.session.close.assert_called_once()
 
     def test_url_list_file(self):
         with tempfile.TemporaryDirectory() as folder:
