@@ -831,7 +831,7 @@ class ClientTests(unittest.TestCase):
             self.client._track_started(2, 'Second Song')
             self.client._track_progress(1, 1024 * 1024, None)
             self.client._track_progress(2, 1024 * 1024, None)
-        self.assertIn('2.0 MB/s', self.last_bar())
+        self.assertIn('2.0MB/s', self.last_bar())
         self.assertEqual(self.client._progress_bytes_received, 2 * 1024 * 1024)
 
     def test_aggregate_speed_excludes_resumed_bytes(self):
@@ -848,6 +848,25 @@ class ClientTests(unittest.TestCase):
         with patch('jiosaavn_core.time.monotonic', return_value=3661):
             self.client._start_progress(1, collection_started_at=0)
         self.assertIn('Elapsed 1:01:01', self.last_bar())
+
+    def test_progress_line_shows_eta_after_two_tracks_complete(self):
+        self.client.progress_enabled = True
+        with patch('jiosaavn_core.time.monotonic',
+                   side_effect=[0, 0, 0, 10, 20, 30, 40, 50]), \
+                patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 20))):
+            self.client._start_progress(5)
+            self.assertNotIn('ETA', self.last_bar())
+            self.client._track_started(3, 'Third Song')
+            self.client._advance_progress(1)
+            self.assertNotIn('ETA', self.last_bar())
+            self.client._advance_progress(2)
+            self.assertIn('ETA 30s', self.last_bar())
+            self.assertIn('Third Song', self.last_bar())
+            self.assertLess(core.display_width(self.last_bar()), 80)
+            self.client._advance_progress(3)
+            self.client._advance_progress(4)
+            self.client._advance_progress(5)
+        self.assertNotIn('ETA', self.last_bar())
 
     def test_percent_is_only_redrawn_when_it_changes(self):
         self.client.progress_enabled = True

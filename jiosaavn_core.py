@@ -266,7 +266,7 @@ class Jiosaavn:
         self._progress_bytes_received = 0
         self._progress_started_at = None
         self._collection_started_at = None
-        self._progress_speed = "0.0 MB/s"
+        self._progress_speed = "0.0MB/s"
         self._progress_track_bytes = {}
         self._progress_active = False  # True while the bar is on screen
         self._active_titles = {}  # {track number: title} shown on the bar line
@@ -322,7 +322,7 @@ class Jiosaavn:
             self._collection_started_at = (
                 self._progress_started_at if collection_started_at is None
                 else collection_started_at)
-            self._progress_speed = "0.0 MB/s"
+            self._progress_speed = "0.0MB/s"
             self._progress_track_bytes = {}
             self._active_titles = {}
             self._active_amount = {}
@@ -345,7 +345,7 @@ class Jiosaavn:
 
     def _write_progress(self):
         """Redraw the bar line. The caller must hold self._progress_lock."""
-        width = 12
+        width = 8
         total = max(self._progress_total, 1)
         filled = int(width * self._progress_done / total)
         bar = "#" * filled + "-" * (width - filled)
@@ -354,6 +354,18 @@ class Jiosaavn:
         minutes, seconds = divmod(remainder, 60)
         line = (f"Downloading [{bar}] {self._progress_done}/{self._progress_total} "
                 f"{self._progress_speed} Elapsed {hours}:{minutes:02d}:{seconds:02d}")
+        remaining = self._progress_total - self._progress_done
+        if self._progress_done >= 2 and remaining > 0:
+            eta = int(elapsed * remaining / self._progress_done)
+            eta_hours, eta_remainder = divmod(eta, 3600)
+            eta_minutes, eta_seconds = divmod(eta_remainder, 60)
+            if eta_hours:
+                eta_text = f"{eta_hours}h{eta_minutes}m"
+            elif eta_minutes:
+                eta_text = f"{eta_minutes}m{eta_seconds}s"
+            else:
+                eta_text = f"{eta_seconds}s"
+            line += f" ETA {eta_text}"
         if self._active_titles:
             line += " " + ", ".join(
                 f"{pos:02d} {self._active_amount[pos] + ' ' if pos in self._active_amount else ''}{title}"
@@ -412,9 +424,9 @@ class Jiosaavn:
                 elapsed = max(time.monotonic() - self._progress_started_at, 0.001)
                 speed_mbps = self._progress_bytes_received / elapsed / (1024 * 1024)
                 if speed_mbps >= 1000:
-                    speed = f"{speed_mbps / 1024:.1f} GB/s"
+                    speed = f"{speed_mbps / 1024:.1f}GB/s"
                 else:
-                    speed = f"{speed_mbps:.1f} MB/s"
+                    speed = f"{speed_mbps:.1f}MB/s"
                 changed = speed != self._progress_speed
                 self._progress_speed = speed
                 if self._active_amount.get(pos) != amount:
