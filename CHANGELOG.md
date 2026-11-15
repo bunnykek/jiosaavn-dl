@@ -12,6 +12,14 @@ Versions follow [semantic versioning](https://semver.org/). Releases are tagged
   it, the service's genre is tagged when there is one. Blank values are
   rejected. Tracks that already exist are skipped with their tags unchanged,
   so add `--overwrite` to retag them.
+- The interactive progress bar shows the aggregate download speed across all
+  active tracks (in MB/s or GB/s), the elapsed collection time as `H:MM:SS`,
+  and an estimated time remaining (`ETA`) once enough tracks have finished to
+  base the estimate on. Resumed bytes and bytes from tracks that fail or are
+  interrupted are excluded from the speed and ETA, so a stalled or interrupted
+  collection shows the rate of what actually completed. These fields only
+  appear on the interactive bar; plain per-track lines printed when output is
+  piped or redirected are unchanged.
 
 ## 0.5.0 - 2026-11-14
 
