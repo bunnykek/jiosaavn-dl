@@ -823,6 +823,26 @@ class ClientTests(unittest.TestCase):
         self.client._track_progress(2, 3_300_000, None)
         self.assertIn('02 3.1MB Second Song', self.last_bar())
 
+    def test_progress_line_shows_aggregate_speed_across_tracks(self):
+        self.client.progress_enabled = True
+        with patch('jiosaavn_core.time.monotonic', side_effect=[0, 1, 1]):
+            self.client._start_progress(3)
+            self.client._track_started(1, 'First Song')
+            self.client._track_started(2, 'Second Song')
+            self.client._track_progress(1, 1024 * 1024, None)
+            self.client._track_progress(2, 1024 * 1024, None)
+        self.assertIn('2.0 MB/s', self.last_bar())
+        self.assertEqual(self.client._progress_bytes_received, 2 * 1024 * 1024)
+
+    def test_aggregate_speed_excludes_resumed_bytes(self):
+        self.client.progress_enabled = True
+        with patch('jiosaavn_core.time.monotonic', side_effect=[0, 1]):
+            self.client._start_progress(2)
+            self.client._track_started(1, 'Resumed Song')
+            self.client._track_progress_baseline(1, 100)
+            self.client._track_progress(1, 150, 200)
+        self.assertEqual(self.client._progress_bytes_received, 50)
+
     def test_percent_is_only_redrawn_when_it_changes(self):
         self.client.progress_enabled = True
         self.client._start_progress(3)

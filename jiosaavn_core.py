@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NamedTuple, Optional
@@ -262,6 +263,10 @@ class Jiosaavn:
         self._progress_lock = threading.Lock()
         self._progress_total = 0
         self._progress_done = 0
+        self._progress_bytes_received = 0
+        self._progress_started_at = None
+        self._progress_speed = "0.0 MB/s"
+        self._progress_track_bytes = {}
         self._progress_active = False  # True while the bar is on screen
         self._active_titles = {}  # {track number: title} shown on the bar line
         self._active_amount = {}  # {track number: "45%" or "3.1MB"} shown next to the title
@@ -311,6 +316,10 @@ class Jiosaavn:
         with self._progress_lock:
             self._progress_total = total
             self._progress_done = 0
+            self._progress_bytes_received = 0
+            self._progress_started_at = time.monotonic()
+            self._progress_speed = "0.0 MB/s"
+            self._progress_track_bytes = {}
             self._active_titles = {}
             self._active_amount = {}
             self._progress_active = True
@@ -322,6 +331,7 @@ class Jiosaavn:
         with self._progress_lock:
             self._active_titles.pop(pos, None)
             self._active_amount.pop(pos, None)
+            self._progress_track_bytes.pop(pos, None)
             self._progress_done += 1
             self._write_progress()
             if self._progress_done >= self._progress_total:
@@ -335,7 +345,8 @@ class Jiosaavn:
         total = max(self._progress_total, 1)
         filled = int(width * self._progress_done / total)
         bar = "#" * filled + "-" * (width - filled)
-        line = f"Downloading [{bar}] {self._progress_done}/{self._progress_total}"
+        line = (f"Downloading [{bar}] {self._progress_done}/{self._progress_total} "
+                f"{self._progress_speed}")
         if self._active_titles:
             line += "  " + ", ".join(
                 f"{pos:02d} {self._active_amount[pos] + ' ' if pos in self._active_amount else ''}{title}"
@@ -350,6 +361,7 @@ class Jiosaavn:
         with self._progress_lock:
             self._active_titles = {}
             self._active_amount = {}
+            self._progress_track_bytes = {}
             if self._progress_done < self._progress_total:
                 sys.stderr.write("\n")
                 sys.stderr.flush()
@@ -361,6 +373,7 @@ class Jiosaavn:
             return
         with self._progress_lock:
             self._active_titles[pos] = " ".join(str(title).split())
+            self._progress_track_bytes[pos] = 0
             self._write_progress()
 
     def _track_finished(self, pos, total, title, artists, outcome, announce=True):
@@ -370,6 +383,7 @@ class Jiosaavn:
         with self._progress_lock:
             self._active_titles.pop(pos, None)
             self._active_amount.pop(pos, None)
+            self._progress_track_bytes.pop(pos, None)
         if announce:
             self._emit(f"  [{pos}/{total}] {outcome}: {title} — {artists}")
 
@@ -384,9 +398,27 @@ class Jiosaavn:
         with self._progress_lock:
             # Redraw only when the shown value changes, and never for a track
             # that has already finished (a late callback).
-            if pos in self._active_titles and self._active_amount.get(pos) != amount:
-                self._active_amount[pos] = amount
-                self._write_progress()
+            if pos in self._active_titles:
+                previous = self._progress_track_bytes.get(pos, 0)
+                self._progress_bytes_received += done - previous if done >= previous else done
+                self._progress_track_bytes[pos] = done
+                elapsed = max(time.monotonic() - self._progress_started_at, 0.001)
+                speed = f"{self._progress_bytes_received / elapsed / (1024 * 1024):.1f} MB/s"
+                changed = speed != self._progress_speed
+                self._progress_speed = speed
+                if self._active_amount.get(pos) != amount:
+                    self._active_amount[pos] = amount
+                    changed = True
+                if changed:
+                    self._write_progress()
+
+    def _track_progress_baseline(self, pos, done):
+        """Set the saved-byte baseline so resumed data is not counted as received."""
+        if not self._progress_active:
+            return
+        with self._progress_lock:
+            if pos in self._active_titles:
+                self._progress_track_bytes[pos] = done
 
     def _track_failed(self, pos, total, exc):
         with self._progress_lock:
@@ -832,6 +864,9 @@ class Jiosaavn:
             except DownloadError as exc:
                 artwork = None
                 self._warning(f"  Warning: cover unavailable: {exc}")
+        partial = self.partial_path(destination)
+        self._track_progress_baseline(
+            song_pos, partial.stat().st_size if partial.exists() else 0)
         temp = self.download_file(
             audio_url, destination,
             progress=lambda done, total: self._track_progress(song_pos, done, total))
