@@ -82,6 +82,14 @@ Settings are saved in `~/Library/Application Support/jiosaavn-dl/config.json` on
 
 Replace `URL`, `URL_1`, and `URL_2` with actual JioSaavn links. You can mix songs, albums, and playlists in one command.
 
+To search and choose items from an interactive terminal instead, run:
+
+```sh
+jiosaavn-dl --interactive
+```
+
+The CLI searches for songs, albums, and playlists, lets you select one or more results, then confirms the output folder, requested bitrate, and overwrite behavior before starting. Press `q` at a prompt or answer `n` at the final confirmation to cancel. Interactive mode requires a terminal for standard input; it does not read selections from a pipe.
+
 Supported link forms include:
 
 - Individual songs: `/song/NAME/TOKEN`, older `/s/song/LANGUAGE/NAME/TOKEN` links, and `/p/song/LANGUAGE/NAME/TOKEN` links.
@@ -105,6 +113,7 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 | Option | Behavior |
 | --- | --- |
 | `-i`, `--input-file FILE` | Read URLs from a text file; use `-` for standard input |
+| `-I`, `--interactive` | Search for tracks, albums, and playlists, select results, and confirm run settings interactively; cannot be combined with URLs or `--input-file` |
 | `-o`, `--output PATH` | Folder for this run; overrides the saved default |
 | `--set-output PATH` | Save a default download folder; can run without a URL |
 | `--show-output` | Show the effective download folder; can run without a URL |

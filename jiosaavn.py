@@ -77,6 +77,107 @@ def genre_text(value):
     return genre
 
 
+def interactive_setup(client, input_fn=None, output_fn=None):
+    """Search for downloadable items and confirm run settings interactively.
+
+    Returns the selected result URLs, or None when the user cancels.
+    """
+    input_fn = input_fn or input
+    output_fn = output_fn or print
+
+    while True:
+        query = input_fn("Search JioSaavn (or q to cancel): ").strip()
+        if query.lower() in ("q", "quit", "cancel"):
+            output_fn("Cancelled.")
+            return None
+        if not query:
+            output_fn("Enter a search query, or q to cancel.")
+            continue
+        results = client.search(query)
+        if results:
+            break
+        output_fn("No supported songs, albums, or playlists found. Try another query.")
+
+    output_fn("Search results:")
+    for index, result in enumerate(results, 1):
+        subtitle = f" — {result['subtitle']}" if result.get("subtitle") else ""
+        output_fn(f"  {index}. [{result['kind']}] {result['title']}{subtitle}")
+
+    while True:
+        choice = input_fn("Select one or more (comma-separated, a=all, q=cancel) [1]: ").strip()
+        if choice.lower() in ("q", "quit", "cancel"):
+            output_fn("Cancelled.")
+            return None
+        if not choice:
+            selected_indices = [0]
+            break
+        if choice.lower() in ("a", "all"):
+            selected_indices = list(range(len(results)))
+            break
+        try:
+            numbers = [int(value.strip()) for value in choice.split(",")]
+            if (not numbers or len(set(numbers)) != len(numbers)
+                    or any(number < 1 or number > len(results) for number in numbers)):
+                raise ValueError
+        except ValueError:
+            output_fn(f"Choose numbers from 1 to {len(results)}, a for all, or q to cancel.")
+            continue
+        selected_indices = [number - 1 for number in numbers]
+        break
+
+    selected = [results[index] for index in selected_indices]
+    current_output = str(client.output)
+    while True:
+        entered_output = input_fn(f"Output folder [{current_output}] (q=cancel): ").strip()
+        if entered_output.lower() in ("q", "quit", "cancel"):
+            output_fn("Cancelled.")
+            return None
+        chosen_output = entered_output or current_output
+        if not chosen_output.strip():
+            output_fn("The output folder cannot be empty.")
+            continue
+        output_path = Path(chosen_output).expanduser()
+        if output_path.exists() and not output_path.is_dir():
+            output_fn(f"Output path is a file: {output_path}")
+            continue
+        break
+
+    while True:
+        quality = input_fn(f"Audio quality in kbps ({'/'.join(('12', '48', '96', '160', '320'))}) "
+                           f"[{client.quality}]: ").strip()
+        if not quality:
+            break
+        if quality in ("12", "48", "96", "160", "320"):
+            client.quality = quality
+            break
+        output_fn("Choose 12, 48, 96, 160, or 320 kbps.")
+
+    default_overwrite = "Y/n" if client.overwrite else "y/N"
+    while True:
+        overwrite = input_fn(f"Replace existing tracks? [{default_overwrite}]: ").strip().lower()
+        if not overwrite:
+            break
+        if overwrite in ("y", "yes"):
+            client.overwrite = True
+            break
+        if overwrite in ("n", "no"):
+            client.overwrite = False
+            break
+        output_fn("Enter y or n.")
+
+    client.output = output_path
+    output_fn("\nReady to download:")
+    for result in selected:
+        output_fn(f"  [{result['kind']}] {result['title']}")
+    output_fn(f"Output: {client.output}")
+    output_fn(f"Quality: {client.quality} kbps")
+    output_fn(f"Replace existing tracks: {'yes' if client.overwrite else 'no'}")
+    if input_fn("Start download? [y/N]: ").strip().lower() not in ("y", "yes"):
+        output_fn("Cancelled.")
+        return None
+    return [result["url"] for result in selected]
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="jiosaavn-dl",
@@ -84,6 +185,8 @@ def build_parser():
         epilog="Example: jiosaavn-dl 'https://www.jiosaavn.com/album/album-name/token' -o ~/Music",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("urls", nargs="*", metavar="URL", help="song, album, or playlist URLs (can be mixed)")
+    parser.add_argument("-I", "--interactive", action="store_true",
+                        help="search for items and confirm download settings interactively")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-i", "--input-file", action="append", default=[], metavar="FILE",
                         help="read one URL per line; repeat for multiple files, or use - for stdin")
@@ -120,7 +223,13 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not args.urls and not args.input_file and args.set_output is None and not args.show_output:
+    if args.interactive and (args.urls or args.input_file):
+        parser.error("--interactive cannot be combined with URLs or --input-file")
+    if args.interactive and not sys.stdin.isatty():
+        print("Error: --interactive requires an interactive terminal (stdin must be a TTY).",
+              file=sys.stderr)
+        return 2
+    if not args.urls and not args.input_file and not args.interactive and args.set_output is None and not args.show_output:
         parser.error("provide at least one URL or --input-file")
     try:
         default_output = save_output(args.set_output) if args.set_output is not None else None
@@ -134,7 +243,7 @@ def main(argv=None):
     except (DownloadError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    if not args.urls and not args.input_file:
+    if not args.urls and not args.input_file and not args.interactive:
         return 0
     client = Jiosaavn(output, args.quality, args.timeout, args.overwrite,
                       not args.no_lyrics, not args.no_cover,
@@ -143,8 +252,14 @@ def main(argv=None):
     client.progress_enabled = not args.quiet and sys.stderr.isatty()
     saved_failed = 0
     try:
+        if args.interactive:
+            urls = interactive_setup(client)
+            if urls is None:
+                return 0
+        else:
+            urls = input_urls(args.urls, args.input_file)
         found_url = False
-        for url in input_urls(args.urls, args.input_file):
+        for url in urls:
             found_url = True
             try:
                 kind, token = resolve_url(url, client)
