@@ -90,7 +90,8 @@ class UrlTests(unittest.TestCase):
         client.request.return_value = redirect
         with self.assertRaises(app.DownloadError):
             app.resolve_url('https://saavn.app.link/example', client)
-        self.assertEqual(client.request.call_count, 6)
+        # Loop detected on 2nd iteration (first visit adds to set, second detects loop)
+        self.assertEqual(client.request.call_count, 2)
 
     def test_short_link_without_web_redirect(self):
         client = Mock()
@@ -699,6 +700,12 @@ class ClientTests(unittest.TestCase):
             'songs': [{'perma_url': URL + str(i)} for i in range(3)],
         })
         executor = Mock()
+        # Support context manager protocol - __exit__ should call shutdown with cancel_futures=True on exception
+        executor.__enter__ = Mock(return_value=executor)
+        def mock_exit(exc_type, exc_val, exc_tb):
+            executor.shutdown(wait=True, cancel_futures=exc_type is not None)
+            return False
+        executor.__exit__ = Mock(side_effect=mock_exit)
         futures = [Future(), Future(), Future()]
         executor.submit.side_effect = futures
         with patch.object(core, 'ThreadPoolExecutor', return_value=executor):

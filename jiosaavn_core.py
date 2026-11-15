@@ -204,7 +204,7 @@ def parse_url(url):
         raise DownloadError("Unsupported URL. Expected a song, album, or playlist link.")
     # Fully decode token to catch double-encoded characters (e.g. %252F -> %2F -> /)
     token = segments[-1]
-    while True:
+    for _ in range(10):  # Prevent DoS via deeply nested encoding
         decoded = unquote(token)
         if decoded == token:
             break
@@ -781,7 +781,9 @@ class Jiosaavn:
                 lyrics = self.api("lyrics.getLyrics", lyrics_id=song["id"], api_version="4")
                 if lyrics.get("lyrics"):
                     audio["\xa9lyr"] = clean_text(re.sub(r"<br\s*/?>", "\n", lyrics["lyrics"]))
-            except DownloadError as exc:
+            except Exception as exc:
+                # Catch all exceptions (API errors, malformed response, regex errors)
+                # so lyrics failure never prevents track download
                 self._warning(f"  Warning: lyrics unavailable: {exc}")
         if artwork:
             image_format = MP4Cover.FORMAT_PNG if artwork.startswith(b"\x89PNG") else MP4Cover.FORMAT_JPEG
@@ -993,8 +995,8 @@ class Jiosaavn:
         self._status(f"  Saved: {destination}", verbose_only=self.progress_enabled)
 
     def _process_collection_track(self, kind, data, name, pos, total, song):
+        self._worker_local.title = None
         retry_url = None
-        track_title = None
         try:
             if not isinstance(song, dict) or not song.get("perma_url"):
                 raise DownloadError("Track is missing its URL.")
@@ -1002,8 +1004,6 @@ class Jiosaavn:
             if track_kind != "song":
                 raise DownloadError("Collection item is not a song URL.")
             retry_url = song["perma_url"]
-            # Extract title early for error reporting (avoids thread-local race)
-            track_title = clean_text(song.get("song")) or track_token
             if (not self.dry_run and not self._provided_session
                     and not hasattr(self._worker_local, "session")):
                 worker_session = self._new_session()
@@ -1016,7 +1016,8 @@ class Jiosaavn:
                               pos, total, f"Playlist - {name}" if kind == "playlist" else False,
                               song_data=song)
         except Exception as exc:
-            label = f"{track_title} (track {pos} of {name})" if track_title else f"Track {pos} of {name}"
+            title = self._worker_local.title
+            label = f"{title} (track {pos} of {name})" if title else f"Track {pos} of {name}"
             self.record_failure(label, exc, retry_url)
             if self._progress_active:
                 self._track_failed(pos, total, exc)
@@ -1026,6 +1027,8 @@ class Jiosaavn:
             self._advance_progress(pos)
 
     def process_collection(self, kind, token):
+        if kind not in ("album", "playlist"):
+            raise DownloadError(f"Unsupported collection kind: {kind}. Expected 'album' or 'playlist'.")
         collection_started_at = time.monotonic()
         data = self.metadata(kind, token)
         songs = data.get("songs")
@@ -1043,26 +1046,37 @@ class Jiosaavn:
             max_pages = (reported_total + page_size - 1) // page_size
 
             def page_signature(items):
-                return tuple(
-                    (item.get("id") or item.get("perma_url") or repr(item))
-                    if isinstance(item, dict) else repr(item)
-                    for item in items)
+                """Create a stable signature for a page of items.
+                Uses only stable identifiers (id, perma_url) to avoid false
+                duplicates from dict repr differences."""
+                sig = []
+                for item in items:
+                    if isinstance(item, dict):
+                        # Prefer stable identifiers; skip items with neither
+                        item_id = item.get("id") or item.get("perma_url")
+                        if item_id:
+                            sig.append(item_id)
+                    # Items without stable IDs are ignored for deduplication
+                return tuple(sig)
 
-            page_signatures = {
-                page_signature(songs)
-            }
-            for page in range(2, max_pages + 1):
-                page_data = self.metadata(kind, token, page=page)
-                page_songs = page_data.get("songs")
-                if not isinstance(page_songs, list) or not page_songs:
-                    break
-                signature = page_signature(page_songs)
-                if signature in page_signatures:
-                    break
-                page_signatures.add(signature)
-                songs.extend(page_songs)
-                if len(songs) >= reported_total:
-                    break
+            first_sig = page_signature(songs)
+            if not first_sig:
+                # No stable IDs in first page; cannot reliably paginate
+                self._warning("Warning: Cannot paginate playlist (no stable track IDs).")
+            else:
+                page_signatures = {first_sig}
+                for page in range(2, max_pages + 1):
+                    page_data = self.metadata(kind, token, page=page)
+                    page_songs = page_data.get("songs")
+                    if not isinstance(page_songs, list) or not page_songs:
+                        break
+                    signature = page_signature(page_songs)
+                    if signature in page_signatures:
+                        break
+                    page_signatures.add(signature)
+                    songs.extend(page_songs)
+                    if len(songs) >= reported_total:
+                        break
         self._status(f"{kind.title()}: {name} ({len(songs)} tracks)")
         if reported_total > len(songs):
             self._warning(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.")
