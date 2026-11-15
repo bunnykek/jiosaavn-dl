@@ -834,6 +834,32 @@ class ClientTests(unittest.TestCase):
         self.assertIn('2.0MB/s', self.last_bar())
         self.assertEqual(self.client._progress_bytes_received, 2 * 1024 * 1024)
 
+    def test_unknown_length_streams_contribute_to_aggregate_speed(self):
+        self.client.progress_enabled = True
+        chunk = b'x' * (1024 * 1024)
+        responses = [response(), response()]
+        for result in responses:
+            result.iter_content.return_value = [chunk]
+        self.session.get.side_effect = responses
+        clock = [0]
+        with patch('jiosaavn_core.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('shutil.get_terminal_size', return_value=os.terminal_size((160, 20))):
+            self.client._start_progress(2)
+            self.client._track_started(1, 'First Song')
+            self.client._track_started(2, 'Second Song')
+            for pos in (1, 2):
+                if pos == 2:
+                    clock[0] = 1
+                path = Path(self.temp.name) / f'track-{pos}.m4a'
+                self.client.download_file(
+                    'https://example.com/audio', path,
+                    progress=lambda done, total, pos=pos: self.client._track_progress(
+                        pos, done, total))
+        self.assertEqual(self.client._progress_bytes_received, 2 * len(chunk))
+        self.assertIn('2.0MB/s', self.last_bar())
+        self.assertIn('01 1.0MB First Song', self.last_bar())
+        self.assertIn('02 1.0MB Second Song', self.last_bar())
+
     def test_aggregate_speed_excludes_resumed_bytes(self):
         self.client.progress_enabled = True
         with patch('jiosaavn_core.time.monotonic', side_effect=[0, 0, 0, 1, 1]):
@@ -867,6 +893,54 @@ class ClientTests(unittest.TestCase):
             self.client._advance_progress(4)
             self.client._advance_progress(5)
         self.assertNotIn('ETA', self.last_bar())
+
+    def test_failed_tracks_contribute_to_eta_work_completed(self):
+        self.client.progress_enabled = True
+        clock = [0]
+
+        def fail_track(song_id, album_artist, song_pos, total_tracks, is_playlist,
+                       song_data=None):
+            self.client._track_started(song_pos, f'Track {song_pos}')
+            clock[0] = song_pos * 10
+            raise app.DownloadError('track failed')
+
+        self.client.processTrack = Mock(side_effect=fail_track)
+        with patch('jiosaavn_core.time.monotonic', side_effect=lambda: clock[0]):
+            self.client._start_progress(4, collection_started_at=0)
+            for pos in range(1, 5):
+                self.client._process_collection_track(
+                    'playlist', {'title': 'Pair'}, 'Pair', pos, 4,
+                    {'perma_url': f'{URL}{pos}'})
+        self.assertEqual(self.client.failed, 4)
+        self.assertIn('ETA 20s', self.output.getvalue())
+        self.assertIn('Elapsed 0:00:40', self.last_bar())
+        self.assertNotIn('ETA', self.last_bar())
+
+    def test_interrupted_unknown_length_download_keeps_speed_and_elapsed(self):
+        self.progress_collection(['Interrupted Song'])
+        self.client.workers = 1
+        chunk = b'x' * (2 * 1024 * 1024)
+        clock = [0]
+
+        def interrupted():
+            clock[0] = 1
+            yield chunk
+            raise requests.ConnectionError('lost connection')
+
+        result = response()
+        result.iter_content.return_value = interrupted()
+        self.session.get.return_value = result
+        with patch('jiosaavn_core.time.monotonic', side_effect=lambda: clock[0]):
+            self.client.process_collection('playlist', 'list')
+        self.assertEqual(self.client.failed, 1)
+        self.assertEqual(self.client._progress_bytes_received, len(chunk))
+        self.assertEqual(self.client._progress_done, 1)
+        self.assertIn('2.0MB/s', self.output.getvalue())
+        self.assertIn('Download interrupted: lost connection', self.output.getvalue())
+        self.assertIn('Elapsed 0:00:01', self.last_bar())
+        partials = list(Path(self.temp.name).rglob('*.part'))
+        self.assertEqual(len(partials), 1)
+        self.assertEqual(partials[0].read_bytes(), chunk)
 
     def test_percent_is_only_redrawn_when_it_changes(self):
         self.client.progress_enabled = True
