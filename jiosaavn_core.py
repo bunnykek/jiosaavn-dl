@@ -666,15 +666,60 @@ class Jiosaavn:
     def artist_albums(self, artist_id, page=1, limit=COLLECTION_PAGE_SIZE):
         """Fetch all albums for an artist.
 
+        Uses search API to find songs by the artist, then extracts unique album URLs.
+        Falls back to artist.getAlbums API if available.
+
         Args:
-            artist_id: Artist token from artist URL
-            page: Page number (1-indexed)
-            limit: Number of albums per page
+            artist_id: Artist token from artist URL (or artist name)
+            page: Page number (1-indexed) for pagination
+            limit: Number of results per page
 
         Returns:
-            Dict with artist info and list of albums
+            Dict with album list extracted from search results
         """
-        return self.api("artist.getAlbums", artist_id=artist_id, p=page, n=limit)
+        # First try the official artist.getAlbums API
+        try:
+            return self.api("artist.getAlbums", artist_id=artist_id, p=page, n=limit)
+        except DownloadError:
+            pass  # Fall through to search-based approach
+
+        # Fallback: Search for songs by artist_id/name, extract unique album URLs
+        # Use artist_id as search query - could be a name or ID
+        search_query = artist_id
+        albums_seen = set()
+        albums = []
+
+        # Search for songs by this artist (use primary_artists_id if numeric)
+        search_limit = min(limit * 5, 100)  # Get more songs to find unique albums
+        data = self.api("search.getResults", q=search_query, p=page, n=search_limit,
+                        _marker="0", ctx="web6dot0")
+        results = data.get("results", [])
+
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            album_url = result.get("album_url")
+            album_title = result.get("album")
+            album_id = result.get("albumid")
+            if not album_url or not album_title:
+                continue
+            # Use album_url as unique key, or album_id if available
+            key = album_id or album_url
+            if key in albums_seen:
+                continue
+            albums_seen.add(key)
+            albums.append({
+                "id": album_id,
+                "title": album_title,
+                "perma_url": album_url,
+                "image": result.get("image"),
+                "year": result.get("year"),
+                "primary_artists": result.get("primary_artists"),
+            })
+            if len(albums) >= limit:
+                break
+
+        return {"albums": albums, "artist_name": search_query}
 
     def search(self, query, limit=10):
         """Search songs, albums, and playlists, returning supported public URLs."""
