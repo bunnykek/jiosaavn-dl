@@ -238,12 +238,12 @@ def parse_url(url):
     """Return (kind, token) for supported public JioSaavn URLs."""
     parts = urlsplit(normalized_url(url))
     segments = parts.path.strip("/").split("/")
-    if len(segments) >= 3 and segments[0] in ("song", "album", "playlist", "featured"):
+    if len(segments) >= 3 and segments[0] in ("song", "album", "playlist", "featured", "artist"):
         kind = "playlist" if segments[0] == "featured" else segments[0]
-    elif len(segments) >= 4 and segments[0] in ("s", "p") and segments[1] in ("song", "album", "playlist", "featured"):
+    elif len(segments) >= 4 and segments[0] in ("s", "p") and segments[1] in ("song", "album", "playlist", "featured", "artist"):
         kind = "playlist" if segments[1] == "featured" else segments[1]
     else:
-        raise DownloadError("Unsupported URL. Expected a song, album, or playlist link.")
+        raise DownloadError("Unsupported URL. Expected a song, album, playlist, or artist link.")
     # Fully decode token to catch double-encoded characters (e.g. %252F -> %2F -> /)
     token = segments[-1]
     for _ in range(10):  # Prevent DoS via deeply nested encoding
@@ -662,6 +662,19 @@ class Jiosaavn:
         if page is not None:
             params["p"] = page
         return self.api("webapi.get", **params)
+
+    def artist_albums(self, artist_id, page=1, limit=COLLECTION_PAGE_SIZE):
+        """Fetch all albums for an artist.
+
+        Args:
+            artist_id: Artist token from artist URL
+            page: Page number (1-indexed)
+            limit: Number of albums per page
+
+        Returns:
+            Dict with artist info and list of albums
+        """
+        return self.api("artist.getAlbums", artist_id=artist_id, p=page, n=limit)
 
     def search(self, query, limit=10):
         """Search songs, albums, and playlists, returning supported public URLs."""
@@ -1414,6 +1427,62 @@ class Jiosaavn:
             for worker_session in worker_sessions:
                 worker_session.close()
             # Clear folder index cache to prevent memory leak across collections
+            self._folder_ids.clear()
+
+    def process_artist(self, artist_id):
+        """Download all albums for an artist.
+
+        Args:
+            artist_id: Artist token from artist URL
+        """
+        collection_started_at = time.monotonic()
+        page = 1
+        all_albums = []
+
+        # Fetch all pages of albums for the artist
+        while True:
+            data = self.artist_albums(artist_id, page=page)
+            albums = data.get("albums") or data.get("data") or []
+
+            if not isinstance(albums, list) or not albums:
+                break
+
+            all_albums.extend(albums)
+
+            # Check if there are more pages
+            if len(albums) < COLLECTION_PAGE_SIZE:
+                break
+            page += 1
+
+        if not all_albums:
+            raise DownloadError("This artist has no available albums.")
+
+        artist_name = clean_text(all_albums[0].get("artist_name") or all_albums[0].get("artist") or "Unknown Artist")
+        self._status(f"Artist: {artist_name} ({len(all_albums)} albums)")
+
+        try:
+            self._start_progress(len(all_albums), collection_started_at)
+            with ThreadPoolExecutor(max_workers=min(self.workers, len(all_albums))) as executor:
+                futures = []
+                try:
+                    for pos, album in enumerate(all_albums, 1):
+                        album_id = album.get("id") or album.get("perma_url", "").split("/")[-1]
+                        if not album_id:
+                            continue
+                        futures.append(executor.submit(
+                            self.processAlbum, album_id))
+                    for future in as_completed(futures):
+                        future.result()
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    raise
+        finally:
+            self._finish_progress()
+            with self._worker_sessions_lock:
+                worker_sessions, self._worker_sessions = self._worker_sessions, []
+            for worker_session in worker_sessions:
+                worker_session.close()
             self._folder_ids.clear()
 
     def processAlbum(self, album_id):

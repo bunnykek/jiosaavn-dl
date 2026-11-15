@@ -46,6 +46,8 @@ class UrlTests(unittest.TestCase):
             ('p/album/hindi/name/token', 'album'), ('p/song/hindi/name/token', 'song'),
             ('p/playlist/user/name/token', 'playlist'),
             ('s/featured/hindi/name/token', 'playlist'), ('p/featured/hindi/name/token', 'playlist'),
+            ('artist/name/token', 'artist'), ('s/artist/hindi/name/token', 'artist'),
+            ('p/artist/hindi/name/token', 'artist'),
         ):
             with self.subTest(path=path):
                 self.assertEqual(app.parse_url(f'https://www.jiosaavn.com/{path}/?source=share#x'),
@@ -103,7 +105,6 @@ class UrlTests(unittest.TestCase):
 
     def test_invalid_links(self):
         for url in ('https://evil.com/song/name/id', 'file:///song/name/id',
-                    'https://www.jiosaavn.com/artist/name/id',
                     'https://www.jiosaavn.com/song/name/%2Ftmp', 'not-a-url'):
             with self.subTest(url=url), self.assertRaises(app.DownloadError):
                 app.parse_url(url)

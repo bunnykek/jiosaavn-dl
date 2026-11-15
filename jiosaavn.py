@@ -233,7 +233,7 @@ def build_parser():
             description="Download JioSaavn songs, albums, and playlists with metadata and artwork.",
             epilog="Example: jiosaavn-dl 'https://www.jiosaavn.com/album/album-name/token' -o ~/Music",
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-        parser.add_argument("urls", nargs="*", metavar="URL", help="song, album, or playlist URLs (can be mixed)")
+        parser.add_argument("urls", nargs="*", metavar="URL", help="song, album, playlist, or artist URLs (can be mixed)")
         parser.add_argument("-I", "--interactive", action="store_true",
                             help="search for items and confirm download settings interactively")
         parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -478,6 +478,8 @@ def _process_url(client, url, args, output):
     kind, token = resolve_url(url, client)
     if kind == "song":
         client.processTrack(token)
+    elif kind == "artist":
+        client.process_artist(token)
     else:
         client.process_collection(kind, token)
     # Export playlist if requested and this was a playlist
@@ -560,6 +562,8 @@ def main(argv=None):
                         kind, token = resolve_url(url, client)
                         if kind == "song":
                             client.processTrack(token)
+                        elif kind == "artist":
+                            client.process_artist(token)
                         else:
                             client.process_collection(kind, token)
                         # Export playlist if requested and this was a playlist
