@@ -207,6 +207,55 @@ class ClientTests(unittest.TestCase):
         self.client.processTrack('token')
         return MP4(next(Path(self.temp.name).rglob('*.m4a')))
 
+    def test_template_renders_folder_layout(self):
+        self.client.template = '{artist}/{album}/{track:02d} - {title}'
+        self.prepare_track()
+        self.client.processTrack('token')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.parent.parent.name, 'Artist')
+        self.assertEqual(path.parent.parent.name, 'An Album')
+        self.assertTrue(path.parent.name.startswith('01 -'))
+
+    def test_template_uses_genre_and_quality_placeholders(self):
+        self.client.template = '{genre}/{quality}/{playlist}'
+        self.client.genre = 'Bollywood'
+        self.prepare_track()
+        self.client.processTrack('token', isPlaylist='My Mix')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.relative_to(self.temp.name),
+                         Path('Bollywood/320/My Mix'))
+
+    def test_template_track_placeholder_is_zero_padded(self):
+        self.client.template = '{track}'
+        self.prepare_track()
+        self.client.processTrack('token', song_pos=12, total_tracks=20)
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.name, '12')
+
+    def test_template_unknown_placeholder_raises(self):
+        with self.assertRaisesRegex(app.DownloadError, 'Unknown template placeholder'):
+            app.render_template('{bogus}', {})
+
+    def test_template_missing_placeholder_raises(self):
+        with self.assertRaisesRegex(app.DownloadError, 'not available'):
+            app.render_template('{album}', {'album': None})
+
+    def test_template_format_only_applied_to_integers(self):
+        self.assertEqual(app.render_template('{track:02d}', {'track': 7}), '07')
+        # A string placeholder is returned as-is even with a format suffix.
+        self.assertEqual(app.render_template('{title:02d}', {'title': 'T'}), 'T')
+
+    def test_template_components_are_sanitized(self):
+        self.client.template = '{album}'
+        self.prepare_track()
+        self.client.processTrack('token')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        # `safe_name` keeps spaces and dashes; only path separators and other
+        # illegal characters are replaced, so a placeholder cannot escape the
+        # output directory or create nested folders.
+        self.assertEqual(path.parent.name, 'An Album')
+        self.assertTrue(str(path.parent).startswith(str(self.temp.name)))
+
     def test_genre_is_written_to_the_genre_tag(self):
         self.prepare_track()
         self.client.genre = 'Bollywood'

@@ -17,6 +17,7 @@ from jiosaavn_core import (
     MAX_WORKERS,
     SHORT_HOSTS,
     SITE_HOSTS,
+    TEMPLATE_PLACEHOLDERS,
     __version__,
     clean_text,
     config_path,
@@ -25,11 +26,18 @@ from jiosaavn_core import (
     normalized_url,
     parse_url,
     resolve_url,
+    render_template,
     safe_name,
     save_failed_urls,
     save_output,
     saved_output,
 )
+
+
+def template_text(value):
+    """Validate an output template, returning it unchanged."""
+    render_template(value, {name: "" for name in TEMPLATE_PLACEHOLDERS})
+    return value
 
 
 def input_urls(urls, input_files):
@@ -203,6 +211,10 @@ def build_parser():
     parser.add_argument("--genre", type=genre_text, metavar="TEXT",
                         help="write TEXT as the genre tag of every track downloaded in this run "
                              "(replaces any genre JioSaavn returns)")
+    parser.add_argument("--template", type=template_text, metavar="PATH",
+                        help="organize tracks into a custom folder layout using "
+                             "{artist}, {album}, {title}, {track}, {year}, {genre}, "
+                             "{quality}, and {playlist}, e.g. {artist}/{album}/{track:02d} - {title}")
     parser.add_argument("--overwrite", action="store_true", help="replace existing tracks")
     parser.add_argument("--no-lyrics", action="store_true", help="skip lyrics lookup")
     parser.add_argument("--no-cover", action="store_true", help="skip artwork download and embedding")
@@ -248,7 +260,7 @@ def main(argv=None):
     client = Jiosaavn(output, args.quality, args.timeout, args.overwrite,
                       not args.no_lyrics, not args.no_cover,
                       quiet=args.quiet, verbose=args.verbose, dry_run=args.dry_run,
-                      workers=args.workers, genre=args.genre)
+                      workers=args.workers, genre=args.genre, template=args.template)
     client.progress_enabled = not args.quiet and sys.stderr.isatty()
     saved_failed = 0
     try:

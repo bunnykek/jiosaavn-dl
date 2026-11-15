@@ -129,6 +129,36 @@ def safe_name(value, fallback="Unknown", max_bytes=255):
     return value or fallback
 
 
+TEMPLATE_PLACEHOLDERS = frozenset((
+    "artist", "album", "title", "track", "year", "genre", "quality", "playlist",
+))
+_TEMPLATE_PATTERN = re.compile(r"\{(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)(?::(?P<fmt>[^}]*))?\}")
+
+
+def render_template(template, values):
+        """Substitute `{placeholder}` fields in `template`.
+
+        `values` maps a placeholder name to its replacement. A `:format` suffix
+        such as `{track:02d}` is applied to integers only; unknown placeholders
+        raise DownloadError so a typo fails loudly instead of passing through.
+        A placeholder that maps to None is treated as unavailable, so a missing
+        field (for example `{playlist}` for a single song) also fails loudly.
+        """
+        def replace(match):
+            name = match.group("name")
+            if name not in TEMPLATE_PLACEHOLDERS:
+                raise DownloadError(f"Unknown template placeholder {{{name}}}")
+            if name not in values or values[name] is None:
+                raise DownloadError(f"Template placeholder {{{name}}} is not available for this track")
+            value = values[name]
+            fmt = match.group("fmt")
+            if fmt and isinstance(value, int):
+                return format(value, fmt)
+            return str(value)
+
+        return _TEMPLATE_PATTERN.sub(replace, template)
+
+
 def normalized_url(url):
     url = unescape(url.strip())
     if "://" not in url:
@@ -247,7 +277,8 @@ def is_true(value):
 class Jiosaavn:
     def __init__(self, output="Downloads", quality="320", timeout=30,
                  overwrite=False, lyrics=True, cover=True, session=None,
-                 quiet=False, verbose=False, dry_run=False, workers=COLLECTION_WORKERS, genre=None):
+                 quiet=False, verbose=False, dry_run=False, workers=COLLECTION_WORKERS,
+                 genre=None, template=None):
         self.output = Path(output).expanduser()
         self.genre = normalize_genre(genre)
         self.workers = max(1, min(int(workers), MAX_WORKERS))
@@ -259,6 +290,7 @@ class Jiosaavn:
         self.quiet = quiet
         self.verbose = verbose
         self.dry_run = dry_run
+        self.template = template
         self.progress_enabled = False
         self._progress_lock = threading.Lock()
         self._progress_total = 0
@@ -566,6 +598,40 @@ class Jiosaavn:
         host = parts.netloc.replace("web", "aac", 1)
         return parts._replace(netloc=host).geturl()
 
+    def _template_values(self, song, artists, isPlaylist, song_pos):
+        """Build the placeholder map for the output template."""
+        year = clean_text(song.get('year')) or "Unknown"
+        genre = self.genre or clean_text(song.get('genre')) or "Unknown"
+        playlist = safe_name(isPlaylist) if isPlaylist else "Unknown"
+        return {
+            "artist": artists,
+            "album": clean_text(song.get('album')) or "Unknown Album",
+            "title": clean_text(song.get('song')) or "Unknown",
+            "track": song_pos,
+            "year": year,
+            "genre": genre,
+            "quality": self.quality,
+            "playlist": playlist,
+        }
+
+    def _template_folder(self, song, artists, isPlaylist, song_pos):
+        """Render the output template into a relative folder path.
+
+        When no template is set, the default album or playlist folder name is
+        returned unchanged. Each path component is sanitized separately so a
+        placeholder cannot escape the output directory.
+        """
+        if not self.template:
+            if isPlaylist:
+                return safe_name(isPlaylist)
+            return safe_name(
+                f"{clean_text(song.get('album')) or 'Unknown Album'} - {artists} "
+                f"[{song.get('year') or 'Unknown'}]")
+        rendered = render_template(self.template,
+                                   self._template_values(song, artists, isPlaylist, song_pos))
+        components = [safe_name(part) for part in rendered.split("/") if part.strip()]
+        return "/".join(components) if components else "Unknown"
+
     def partial_path(self, path):
         """Temporary file for an in-progress download of `path`.
 
@@ -823,10 +889,7 @@ class Jiosaavn:
             raise DownloadError("Track metadata is missing or has an unsupported format.")
         title = clean_text(song.get("song")) or song_id
         artists = clean_text(album_artist or song.get("primary_artists")) or "Unknown Artist"
-        if isPlaylist:
-            folder = safe_name(isPlaylist)
-        else:
-            folder = safe_name(f"{clean_text(song.get('album')) or 'Unknown Album'} - {artists} [{song.get('year') or 'Unknown'}]")
+        folder = self._template_folder(song, artists, isPlaylist, song_pos)
         directory = self.output / folder
         prefix = f"{song_pos:02d}. "
         suffix = ".m4a"

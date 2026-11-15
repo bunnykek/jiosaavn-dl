@@ -12,6 +12,14 @@ Versions follow [semantic versioning](https://semver.org/). Releases are tagged
   it, the service's genre is tagged when there is one. Blank values are
   rejected. Tracks that already exist are skipped with their tags unchanged,
   so add `--overwrite` to retag them.
+- `--template PATH` organizes tracks into a custom folder layout using the
+  placeholders `{artist}`, `{album}`, `{title}`, `{track}`, `{year}`,
+  `{genre}`, `{quality}`, and `{playlist}`, for example
+  `{artist}/{album}/{track:02d} - {title}`. Each path component is sanitized
+  separately, so a placeholder cannot escape the output directory. `{track}`
+  is the collection position and accepts an integer format such as
+  `{track:02d}`. Unknown or unavailable placeholders fail loudly instead of
+  passing through. The default layout is unchanged.
 - The interactive progress bar shows the aggregate download speed across all
   active tracks (in MB/s or GB/s), the elapsed collection time as `H:MM:SS`,
   and an estimated time remaining (`ETA`) once enough tracks have finished to

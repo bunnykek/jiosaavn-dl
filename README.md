@@ -121,6 +121,7 @@ Blank lines and lines starting with `#` are ignored. Repeat `-i` to read multipl
 | `--timeout SECONDS` | Positive timeout per network request; default `30` |
 | `--workers N` | Tracks downloaded at once from albums and playlists, `1` to `16`; default `4`. Lower it if you see rate-limit errors or have a slow connection |
 | `--genre TEXT` | Write `TEXT` as the genre tag of every track downloaded in this run. It replaces any genre JioSaavn returns for the track (the service does not always provide one). Existing tracks are skipped with their tags unchanged; add `--overwrite` to retag them |
+| `--template PATH` | Organize tracks into a custom folder layout using `{artist}`, `{album}`, `{title}`, `{track}`, `{year}`, `{genre}`, `{quality}`, and `{playlist}`, for example `{artist}/{album}/{track:02d} - {title}`. Each path component is sanitized separately, so a placeholder cannot escape the output directory. `{track}` is the collection position and accepts an integer format such as `{track:02d}`. The default layout is `ALBUM - ARTIST [YEAR]` for albums and `Playlist - NAME` for playlists |
 | `--overwrite` | Replace existing tracks after a successful download and tagging |
 | `--no-lyrics` | Skip lyrics lookup |
 | `--no-cover` | Skip artwork download and embedding |
