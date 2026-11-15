@@ -265,6 +265,7 @@ class Jiosaavn:
         self._progress_done = 0
         self._progress_bytes_received = 0
         self._progress_started_at = None
+        self._collection_started_at = None
         self._progress_speed = "0.0 MB/s"
         self._progress_track_bytes = {}
         self._progress_active = False  # True while the bar is on screen
@@ -310,7 +311,7 @@ class Jiosaavn:
         if not self.quiet:
             self._emit(message, sys.stderr)
 
-    def _start_progress(self, total):
+    def _start_progress(self, total, collection_started_at=None):
         if not self.progress_enabled or self.quiet:
             return
         with self._progress_lock:
@@ -318,6 +319,9 @@ class Jiosaavn:
             self._progress_done = 0
             self._progress_bytes_received = 0
             self._progress_started_at = time.monotonic()
+            self._collection_started_at = (
+                self._progress_started_at if collection_started_at is None
+                else collection_started_at)
             self._progress_speed = "0.0 MB/s"
             self._progress_track_bytes = {}
             self._active_titles = {}
@@ -341,14 +345,17 @@ class Jiosaavn:
 
     def _write_progress(self):
         """Redraw the bar line. The caller must hold self._progress_lock."""
-        width = 24
+        width = 12
         total = max(self._progress_total, 1)
         filled = int(width * self._progress_done / total)
         bar = "#" * filled + "-" * (width - filled)
+        elapsed = max(0, int(time.monotonic() - self._collection_started_at))
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
         line = (f"Downloading [{bar}] {self._progress_done}/{self._progress_total} "
-                f"{self._progress_speed}")
+                f"{self._progress_speed} Elapsed {hours}:{minutes:02d}:{seconds:02d}")
         if self._active_titles:
-            line += "  " + ", ".join(
+            line += " " + ", ".join(
                 f"{pos:02d} {self._active_amount[pos] + ' ' if pos in self._active_amount else ''}{title}"
                 for pos, title in sorted(self._active_titles.items()))
         columns = shutil.get_terminal_size((80, 24)).columns
@@ -403,7 +410,11 @@ class Jiosaavn:
                 self._progress_bytes_received += done - previous if done >= previous else done
                 self._progress_track_bytes[pos] = done
                 elapsed = max(time.monotonic() - self._progress_started_at, 0.001)
-                speed = f"{self._progress_bytes_received / elapsed / (1024 * 1024):.1f} MB/s"
+                speed_mbps = self._progress_bytes_received / elapsed / (1024 * 1024)
+                if speed_mbps >= 1000:
+                    speed = f"{speed_mbps / 1024:.1f} GB/s"
+                else:
+                    speed = f"{speed_mbps:.1f} MB/s"
                 changed = speed != self._progress_speed
                 self._progress_speed = speed
                 if self._active_amount.get(pos) != amount:
@@ -913,6 +924,7 @@ class Jiosaavn:
             self._advance_progress(pos)
 
     def process_collection(self, kind, token):
+        collection_started_at = time.monotonic()
         data = self.metadata(kind, token)
         songs = data.get("songs")
         if not isinstance(songs, list) or not songs:
@@ -953,7 +965,7 @@ class Jiosaavn:
         if reported_total > len(songs):
             self._warning(f"Warning: JioSaavn returned {len(songs)} of {reported_total} tracks.")
         try:
-            self._start_progress(len(songs))
+            self._start_progress(len(songs), collection_started_at)
             executor = ThreadPoolExecutor(max_workers=min(self.workers, len(songs)))
             futures = []
             try:

@@ -825,7 +825,7 @@ class ClientTests(unittest.TestCase):
 
     def test_progress_line_shows_aggregate_speed_across_tracks(self):
         self.client.progress_enabled = True
-        with patch('jiosaavn_core.time.monotonic', side_effect=[0, 1, 1]):
+        with patch('jiosaavn_core.time.monotonic', side_effect=[0, 0, 0, 0, 1, 1, 1, 1]):
             self.client._start_progress(3)
             self.client._track_started(1, 'First Song')
             self.client._track_started(2, 'Second Song')
@@ -836,12 +836,18 @@ class ClientTests(unittest.TestCase):
 
     def test_aggregate_speed_excludes_resumed_bytes(self):
         self.client.progress_enabled = True
-        with patch('jiosaavn_core.time.monotonic', side_effect=[0, 1]):
+        with patch('jiosaavn_core.time.monotonic', side_effect=[0, 0, 0, 1, 1]):
             self.client._start_progress(2)
             self.client._track_started(1, 'Resumed Song')
             self.client._track_progress_baseline(1, 100)
             self.client._track_progress(1, 150, 200)
         self.assertEqual(self.client._progress_bytes_received, 50)
+
+    def test_progress_line_shows_elapsed_collection_time(self):
+        self.client.progress_enabled = True
+        with patch('jiosaavn_core.time.monotonic', return_value=3661):
+            self.client._start_progress(1, collection_started_at=0)
+        self.assertIn('Elapsed 1:01:01', self.last_bar())
 
     def test_percent_is_only_redrawn_when_it_changes(self):
         self.client.progress_enabled = True
