@@ -663,11 +663,34 @@ class Jiosaavn:
             params["p"] = page
         return self.api("webapi.get", **params)
 
+    @staticmethod
+    def _normalize_album_title(title):
+        """Normalize album title for deduplication by removing edition suffixes.
+
+        Removes text in parentheses/brackets that indicate editions:
+        e.g., "Dangerous Woman (Tenth Anniversary Edition)" -> "Dangerous Woman"
+        Also handles suffixes after colons: "Album Deluxe: Bonus" -> "Album"
+        """
+        import re
+        # Remove text in parentheses or brackets that looks like edition info
+        # Patterns: (Edition), [Edition], (Deluxe), [Deluxe], (Remastered), etc.
+        normalized = re.sub(r'\s*[\(\[].*?(edition|deluxe|remaster|remastered|anniversary|expanded|bonus|reissue|special|collector|limited|demo|acoustic|live|instrumental|version|remix).*?[\)\]]', '', title, flags=re.IGNORECASE)
+        # Also remove edition suffixes after colon: "Album Deluxe: Bonus Tracks" -> "Album"
+        normalized = re.sub(r'\s*:\s*(edition|deluxe|remaster|remastered|anniversary|expanded|bonus|reissue|special|collector|limited|demo|acoustic|live|instrumental|version|remix).*$', '', normalized, flags=re.IGNORECASE)
+        # Also remove "Word:" suffixes like "Album Deluxe:" -> "Album"
+        normalized = re.sub(r'\s+\b(edition|deluxe|remaster|remastered|anniversary|expanded|bonus|reissue|special|collector|limited|demo|acoustic|live|instrumental|version|remix):\s*.*$', '', normalized, flags=re.IGNORECASE)
+        # Also remove trailing version numbers like " (2021)", " [2021]"
+        normalized = re.sub(r'\s*[\(\[](\d{4})[\)\]]', '', normalized)
+        return normalized.strip()
+
     def artist_albums(self, artist_id, page=1, limit=COLLECTION_PAGE_SIZE):
         """Fetch all albums for an artist.
 
         Uses search API to find songs by the artist, then extracts unique album URLs.
         Falls back to artist.getAlbums API if available.
+
+        Deduplicates albums by normalizing titles (removing edition suffixes)
+        so that "Album (Deluxe)" and "Album (Anniversary Edition)" are treated as same.
 
         Args:
             artist_id: Artist token from artist URL (or artist name)
@@ -686,7 +709,7 @@ class Jiosaavn:
         # Fallback: Search for songs by artist_id/name, extract unique album URLs
         # Use artist_id as search query - could be a name or ID
         search_query = artist_id
-        albums_seen = set()
+        albums_seen = set()  # Track normalized titles for deduplication
         albums = []
 
         # Search for songs by this artist (use primary_artists_id if numeric)
@@ -703,11 +726,13 @@ class Jiosaavn:
             album_id = result.get("albumid")
             if not album_url or not album_title:
                 continue
-            # Use album_url as unique key, or album_id if available
-            key = album_id or album_url
-            if key in albums_seen:
+            # Normalize title for deduplication (compare base album name)
+            normalized_title = self._normalize_album_title(album_title)
+            if not normalized_title:
                 continue
-            albums_seen.add(key)
+            if normalized_title in albums_seen:
+                continue
+            albums_seen.add(normalized_title)
             albums.append({
                 "id": album_id,
                 "title": album_title,
