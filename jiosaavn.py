@@ -289,6 +289,18 @@ def build_parser():
                             help="process multiple URLs concurrently (1-4, default 1)")
         parser.add_argument("--post-hook", metavar="CMD",
                             help="run CMD after each successful download (receives file path as argument)")
+        parser.add_argument("--no-explicit", action="store_true",
+                            help="skip tracks marked as explicit content")
+        parser.add_argument("--after-year", type=int, metavar="YEAR",
+                            help="only download tracks released after YEAR (inclusive)")
+        parser.add_argument("--before-year", type=int, metavar="YEAR",
+                            help="only download tracks released before YEAR (inclusive)")
+        parser.add_argument("--search", metavar="QUERY",
+                            help="search for songs/albums/playlists and download matching results")
+        parser.add_argument("--search-limit", type=int, default=10, metavar="N",
+                            help="number of search results to consider (default 10)")
+        parser.add_argument("--search-type", choices=("song", "album", "playlist", "all"),
+                            default="all", help="type of results to search for")
 
         output_group = parser.add_mutually_exclusive_group()
         output_group.add_argument("--quiet", action="store_true",
@@ -518,7 +530,7 @@ def main(argv=None):
         except (DownloadError, OSError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
-        if not args.urls and not args.input_file and not args.interactive:
+        if not args.urls and not args.input_file and not args.interactive and not args.search:
             return 0
         client = Jiosaavn(output, args.quality, args.timeout, args.overwrite,
                           not args.no_lyrics, not args.no_cover,
@@ -529,7 +541,10 @@ def main(argv=None):
                           fallback_qualities=args.fallback_quality,
                           save_lyrics_file=args.save_lyrics_file,
                           save_cover_file=args.save_cover_file,
-                          post_hook=args.post_hook)
+                          post_hook=args.post_hook,
+                          no_explicit=args.no_explicit,
+                          after_year=args.after_year,
+                          before_year=args.before_year)
         client.progress_enabled = not args.quiet and sys.stderr.isatty()
         saved_failed = 0
         try:
@@ -539,6 +554,29 @@ def main(argv=None):
                     return 0
             else:
                 urls = list(input_urls(args.urls, args.input_file))
+
+            # Handle search and download
+            if args.search:
+                search_results = client.search(args.search, limit=args.search_limit)
+                # Filter by type if specified
+                if args.search_type != "all":
+                    search_results = [r for r in search_results if r["kind"] == args.search_type]
+                if not search_results:
+                    print(f"No {args.search_type} results found for: {args.search}")
+                else:
+                    print(f"Found {len(search_results)} {args.search_type} result(s) for: {args.search}")
+                    for i, result in enumerate(search_results, 1):
+                        print(f"  {i}. [{result['kind']}] {result['title']} — {result['subtitle']}")
+                    # Ask for confirmation unless in non-interactive mode
+                    if not args.interactive and sys.stdin.isatty():
+                        confirm = input("Download these? [y/N]: ").strip().lower()
+                        if confirm not in ("y", "yes"):
+                            print("Cancelled.")
+                            return 0
+                    # Add search result URLs to download queue
+                    for result in search_results:
+                        urls.append(result["url"])
+
             if not urls:
                 raise DownloadError("The input lists contain no URLs.")
 

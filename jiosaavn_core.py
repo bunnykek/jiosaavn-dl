@@ -365,7 +365,8 @@ class Jiosaavn:
                  quiet=False, verbose=False, dry_run=False, workers=COLLECTION_WORKERS,
                  genre=None, template=None, max_speed=None, proxy=None,
                  incremental=False, fallback_qualities=None, save_lyrics_file=False,
-                 save_cover_file=False, post_hook=None):
+                 save_cover_file=False, post_hook=None, no_explicit=False,
+                 after_year=None, before_year=None):
         self.output = Path(output).expanduser()
         self.genre = normalize_genre(genre)
         self.workers = max(1, min(int(workers), MAX_WORKERS))
@@ -385,6 +386,9 @@ class Jiosaavn:
         self.save_lyrics_file = save_lyrics_file
         self.save_cover_file = save_cover_file
         self.post_hook = post_hook
+        self.no_explicit = no_explicit
+        self.after_year = after_year
+        self.before_year = before_year
         self.progress_enabled = False
         self._progress_lock = threading.Lock()
         self._progress_total = 0
@@ -1238,6 +1242,29 @@ class Jiosaavn:
                              if isinstance(value, dict) and "song" in value), None)
         if song is None:
             raise DownloadError("Track metadata is missing or has an unsupported format.")
+
+        # Filter by explicit content
+        if self.no_explicit and is_true(song.get("explicit_content")):
+            self._increment_counter("skipped")
+            self._status(f"  Skipped (explicit content): {clean_text(song.get('song')) or song_id}",
+                         verbose_only=self.progress_enabled)
+            return
+
+        # Filter by release year
+        year_str = clean_text(song.get("year"))
+        if year_str and year_str.isdigit():
+            year = int(year_str)
+            if self.after_year is not None and year < self.after_year:
+                self._increment_counter("skipped")
+                self._status(f"  Skipped (year {year} before --after-year {self.after_year}): {clean_text(song.get('song')) or song_id}",
+                             verbose_only=self.progress_enabled)
+                return
+            if self.before_year is not None and year > self.before_year:
+                self._increment_counter("skipped")
+                self._status(f"  Skipped (year {year} after --before-year {self.before_year}): {clean_text(song.get('song')) or song_id}",
+                             verbose_only=self.progress_enabled)
+                return
+
         title = clean_text(song.get("song")) or song_id
         artists = clean_text(album_artist or song.get("primary_artists")) or "Unknown Artist"
         folder = self._template_folder(song, artists, isPlaylist, song_pos)
