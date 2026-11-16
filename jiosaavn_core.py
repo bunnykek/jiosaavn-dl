@@ -41,6 +41,125 @@ class _RetryWithRetryAfter(Retry):
                 return new_retry.increment(method, url, response, _pool, _stacktrace)
         return super().increment(method, url, response, _pool, _stacktrace)
 
+# ANSI color codes
+class Colors:
+    """ANSI color codes for terminal output."""
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    
+    # Foreground colors
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    GRAY = "\033[90m"
+    
+    # Bright foreground colors
+    BRIGHT_RED = "\033[91m"
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_BLUE = "\033[94m"
+    BRIGHT_MAGENTA = "\033[95m"
+    BRIGHT_CYAN = "\033[96m"
+    BRIGHT_WHITE = "\033[97m"
+
+    @classmethod
+    def enabled(cls):
+        """Check if color output should be enabled."""
+        import sys
+        return sys.stderr.isatty() and sys.stdout.isatty()
+
+    @classmethod
+    def disable(cls):
+        """Disable colors by setting all to empty string."""
+        for attr in dir(cls):
+            if not attr.startswith('_') and attr not in ('enabled', 'disable'):
+                setattr(cls, attr, '')
+
+    @classmethod
+    def colorize(cls, text, color):
+        """Apply color to text if colors are enabled."""
+        if cls.enabled():
+            return f"{color}{text}{cls.RESET}"
+        return text
+
+    @classmethod
+    def red(cls, text): return cls.colorize(text, cls.RED)
+    @classmethod
+    def green(cls, text): return cls.colorize(text, cls.GREEN)
+    @classmethod
+    def yellow(cls, text): return cls.colorize(text, cls.YELLOW)
+    @classmethod
+    def blue(cls, text): return cls.colorize(text, cls.BLUE)
+    @classmethod
+    def cyan(cls, text): return cls.colorize(text, cls.CYAN)
+    @classmethod
+    def gray(cls, text): return cls.colorize(text, cls.GRAY)
+    @classmethod
+    def bold(cls, text): return cls.colorize(text, cls.BOLD)
+    @classmethod
+    def dim(cls, text): return cls.colorize(text, cls.DIM)
+
+
+class Spinner:
+    """Simple spinner for long-running operations."""
+    
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    
+    def __init__(self, message="", delay=0.1):
+        self.message = message
+        self.delay = delay
+        self._running = False
+        self._thread = None
+        self._index = 0
+    
+    def start(self):
+        """Start the spinner in a background thread."""
+        if not Colors.enabled():
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+    
+    def stop(self, final_message=""):
+        """Stop the spinner and optionally show a final message."""
+        if not Colors.enabled():
+            return
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=0.5)
+        if final_message:
+            sys.stderr.write(f"\r\033[K{final_message}\n")
+            sys.stderr.flush()
+    
+    def _spin(self):
+        while self._running:
+            frame = self.FRAMES[self._index % len(self.FRAMES)]
+            self._index += 1
+            sys.stderr.write(f"\r\033[K{cyan(self.FRAMES[self._index % len(self.FRAMES)])} {self.message}")
+            sys.stderr.flush()
+            time.sleep(self.delay)
+
+
+def color_enabled():
+    """Check if color output is enabled."""
+    return Colors.enabled()
+
+
+def red(text): return Colors.red(text)
+def green(text): return Colors.green(text)
+def yellow(text): return Colors.yellow(text)
+def blue(text): return Colors.blue(text)
+def cyan(text): return Colors.cyan(text)
+def gray(text): return Colors.gray(text)
+def bold(text): return Colors.bold(text)
+def dim(text): return Colors.dim(text)
+
+
 API_URL = "https://www.jiosaavn.com/api.php"
 COLLECTION_PAGE_SIZE = 1000
 COLLECTION_WORKERS = 4  # default number of tracks downloaded at once
@@ -439,6 +558,10 @@ class Jiosaavn:
 
     def _warning(self, message):
         if not self.quiet:
+            if Colors.enabled():
+                message = yellow(f"Warning: {message}")
+            else:
+                message = f"Warning: {message}"
             self._emit(message, sys.stderr)
 
     def _start_progress(self, total, collection_started_at=None):
@@ -478,12 +601,19 @@ class Jiosaavn:
         width = 8
         total = max(self._progress_total, 1)
         filled = int(width * self._progress_done / total)
-        bar = "#" * filled + "-" * (width - filled)
+        # Color the progress bar
+        bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
+        bar_empty = gray("-" * (width - filled)) if Colors.enabled() else "-" * (width - filled)
+        bar = bar_filled + bar_empty
         elapsed = max(0, int(time.monotonic() - self._collection_started_at))
         hours, remainder = divmod(elapsed, 3600)
         minutes, seconds = divmod(remainder, 60)
-        line = (f"Downloading [{bar}] {self._progress_done}/{self._progress_total} "
-                f"{self._progress_speed} Elapsed {hours}:{minutes:02d}:{seconds:02d}")
+        # Colorize key metrics
+        progress_text = bold(f"{self._progress_done}/{self._progress_total}") if Colors.enabled() else f"{self._progress_done}/{self._progress_total}"
+        speed_text = cyan(self._progress_speed) if Colors.enabled() else self._progress_speed
+        elapsed_text = blue(f"{hours}:{minutes:02d}:{seconds:02d}") if Colors.enabled() else f"{hours}:{minutes:02d}:{seconds:02d}"
+        line = (f"Downloading [{bar}] {progress_text} "
+                f"{speed_text} Elapsed {elapsed_text}")
         remaining = self._progress_total - self._progress_done
         if self._progress_done >= 2 and remaining > 0:
             eta = int(elapsed * remaining / self._progress_done)
@@ -495,6 +625,7 @@ class Jiosaavn:
                 eta_text = f"{eta_minutes}m{eta_seconds}s"
             else:
                 eta_text = f"{eta_seconds}s"
+            eta_text = yellow(eta_text) if Colors.enabled() else eta_text
             line += f" ETA {eta_text}"
         if self._active_titles:
             line += " " + ", ".join(
@@ -534,6 +665,16 @@ class Jiosaavn:
             self._active_amount.pop(pos, None)
             self._progress_track_bytes.pop(pos, None)
         if announce:
+            # Colorize the outcome
+            if Colors.enabled():
+                if outcome == "Downloaded":
+                    outcome = green(outcome)
+                elif outcome == "Skipped":
+                    outcome = yellow(outcome)
+                elif outcome == "Failed":
+                    outcome = red(outcome)
+                elif outcome == "Would download":
+                    outcome = cyan(outcome)
             self._emit(f"  [{pos}/{total}] {outcome}: {title} — {artists}")
 
     def _track_progress(self, pos, done, total):
@@ -577,7 +718,8 @@ class Jiosaavn:
         with self._progress_lock:
             title = self._active_titles.pop(pos, None)
             self._active_amount.pop(pos, None)
-        self._emit(f"  [{pos}/{total}] Failed: {title or f'track {pos}'} — {exc}", sys.stderr)
+        failed_text = red("Failed") if Colors.enabled() else "Failed"
+        self._emit(f"  [{pos}/{total}] {failed_text}: {title or f'track {pos}'} — {exc}", sys.stderr)
 
     def _configure_session(self, session):
         retries = _RetryWithRetryAfter(total=3, backoff_factor=0.5,
@@ -718,8 +860,13 @@ class Jiosaavn:
 
         # Search for songs by this artist (use primary_artists_id if numeric)
         search_limit = min(limit * 5, 100)  # Get more songs to find unique albums
-        data = self.api("search.getResults", q=search_query, p=page, n=search_limit,
-                        _marker="0", ctx="web6dot0")
+        spinner = Spinner(f"Fetching albums for {search_query}...")
+        spinner.start()
+        try:
+            data = self.api("search.getResults", q=search_query, p=page, n=search_limit,
+                            _marker="0", ctx="web6dot0")
+        finally:
+            spinner.stop(f"Found albums for {search_query}")
         results = data.get("results", [])
 
         for result in results:
@@ -762,7 +909,12 @@ class Jiosaavn:
         if limit < 1 or limit > 50:
             raise DownloadError("Search result limit must be between 1 and 50.")
 
-        data = self.api("search.getResults", q=query, p=1, n=limit)
+        spinner = Spinner(f"Searching for '{query}'...")
+        spinner.start()
+        try:
+            data = self.api("search.getResults", q=query, p=1, n=limit)
+        finally:
+            spinner.stop(f"Search completed for '{query}'")
         results = data.get("results")
         if not isinstance(results, list):
             raise DownloadError("JioSaavn returned an unsupported search response.")
@@ -1293,7 +1445,8 @@ class Jiosaavn:
             return
         if self.dry_run:
             self._increment_counter("planned")
-            details = f"  Would download: {destination}"
+            would_download = cyan("Would download") if Colors.enabled() else "Would download"
+            details = f"  {would_download}: {destination}"
             if self.verbose:
                 details += f" (JioSaavn ID: {track_id})"
             self._status(details)

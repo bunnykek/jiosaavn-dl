@@ -14,6 +14,7 @@ from jiosaavn_core import (
     API_URL,
     COLLECTION_PAGE_SIZE,
     COLLECTION_WORKERS,
+    Colors,
     DownloadError,
     Jiosaavn,
     MAX_WORKERS,
@@ -625,16 +626,23 @@ def main(argv=None):
                     print(f"Warning: could not save the failed list: {exc}", file=sys.stderr)
         if not args.quiet:
             if args.dry_run:
-                print(f"\nFinished: {client.planned} planned, {client.skipped} skipped, {client.failed} failed.")
+                planned = green(str(client.planned)) if Colors.enabled() else str(client.planned)
+                skipped = yellow(str(client.skipped)) if Colors.enabled() else str(client.skipped)
+                failed = red(str(client.failed)) if Colors.enabled() else str(client.failed)
+                print(f"\nFinished: {planned} planned, {skipped} skipped, {failed} failed.")
             else:
-                print(f"\nFinished: {client.downloaded} downloaded, {client.skipped} skipped, {client.failed} failed.")
+                downloaded = green(str(client.downloaded)) if Colors.enabled() else str(client.downloaded)
+                skipped = yellow(str(client.skipped)) if Colors.enabled() else str(client.skipped)
+                failed = red(str(client.failed)) if Colors.enabled() else str(client.failed)
+                print(f"\nFinished: {downloaded} downloaded, {skipped} skipped, {failed} failed.")
             if client.failures:
                 print(f"\nFailed ({len(client.failures)}):")
                 for failure in client.failures:
                     print(f"  {failure.label}: {failure.reason}")
             if saved_failed:
                 plural = "" if saved_failed == 1 else "s"
-                print(f"\nSaved {saved_failed} failed URL{plural} to {args.failed_file}. "
+                saved = green(str(saved_failed)) if Colors.enabled() else str(saved_failed)
+                print(f"\nSaved {saved} failed URL{plural} to {args.failed_file}. "
                       f"Retry with: jiosaavn-dl -i {args.failed_file}")
         return 1 if client.failed else 0
 
