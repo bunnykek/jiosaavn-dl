@@ -714,17 +714,16 @@ class Jiosaavn:
         hours, remainder = divmod(elapsed, 3600)
         minutes, seconds = divmod(remainder, 60)
         
-        # Global indicator: downloaded/total with active count
         active_count = len(self._active_titles)
+        
+        # Global progress info
         progress_text = bold(f"{self._progress_done}/{self._progress_total}") if Colors.enabled() else f"{self._progress_done}/{self._progress_total}"
-        if active_count:
-            active_text = cyan(f" ({active_count} downloading)") if Colors.enabled() else f" ({active_count} downloading)"
-            progress_text += active_text
+        active_text = cyan(f" ({active_count} active)") if Colors.enabled() and active_count else ""
         
         speed_text = cyan(self._progress_speed) if Colors.enabled() else self._progress_speed
         elapsed_text = blue(f"{hours}:{minutes:02d}:{seconds:02d}") if Colors.enabled() else f"{hours}:{minutes:02d}:{seconds:02d}"
         
-        # Global progress bar (compact)
+        # Global progress bar (20 chars)
         bar_width = 20
         total = max(self._progress_total, 1)
         filled = int(bar_width * self._progress_done / total)
@@ -732,16 +731,7 @@ class Jiosaavn:
         bar_empty = gray("-" * (bar_width - filled)) if Colors.enabled() else "-" * (bar_width - filled)
         overall_bar = bar_filled + bar_empty
         
-        # Build compact status line
-        parts = [
-            f"Downloading {bold(f'{self._progress_done}/{self._progress_total}') if Colors.enabled() else f'{self._progress_done}/{self._progress_total}'}"
-        ]
-        if active_count:
-            parts.append(cyan(f"({active_count} active)") if Colors.enabled() else f"({active_count} active)")
-        parts.append(f"[{green('#' * int(20 * self._progress_done / max(self._progress_total, 1))) if Colors.enabled() else '#' * int(20 * self._progress_done / max(self._progress_total, 1))}{'-' * (20 - int(20 * self._progress_done / max(self._progress_total, 1)))}]")
-        parts.append(speed_text)
-        parts.append(f"Elapsed {blue(f'{hours}:{minutes:02d}:{seconds:02d}') if Colors.enabled() else f'{hours}:{minutes:02d}:{seconds:02d}'}")
-        
+        # ETA
         remaining = self._progress_total - self._progress_done
         if self._progress_done >= 2 and remaining > 0:
             eta = int(elapsed * remaining / self._progress_done)
@@ -753,25 +743,64 @@ class Jiosaavn:
                 eta_text = f"{eta_minutes}m{eta_seconds}s"
             else:
                 eta_text = f"{eta_seconds}s"
-            parts.append(yellow(f"ETA {eta_text}") if Colors.enabled() else f"ETA {eta_text}")
+            eta_str = yellow(f"ETA {eta_text}") if Colors.enabled() else f"ETA {eta_text}"
+        else:
+            eta_str = ""
         
-        line = "  ".join(parts)
+        # Build header line
+        parts = [
+            f"Downloading {bold(f'{self._progress_done}/{self._progress_total}') if Colors.enabled() else f'{self._progress_done}/{self._progress_total}'}",
+            f"[{green('#' * int(20 * self._progress_done / max(self._progress_total, 1))) if Colors.enabled() else '#' * int(20 * self._progress_done / max(self._progress_total, 1))}{'-' * (20 - int(20 * self._progress_done / max(self._progress_total, 1)))}]",
+            cyan(self._progress_speed) if Colors.enabled() else self._progress_speed,
+            f"Elapsed {blue(f'{hours}:{minutes:02d}:{seconds:02d}') if Colors.enabled() else f'{hours}:{minutes:02d}:{seconds:02d}'}",
+        ]
+        if active_count:
+            parts.append(cyan(f"({active_count} active)"))
+        if eta_str:
+            parts.append(yellow(f"ETA {eta_text}"))
         
-        # Show active downloads (max 3) on next line
-        if self._active_titles:
-            active_items = []
-            for pos in sorted(self._active_titles.keys())[:3]:
-                title = self._active_titles[pos]
-                amount = self._active_amount.get(pos, "")
-                if len(title) > 40:
-                    title = title[:37] + "..."
-                active_items.append(f"  {pos:02d} {amount} {title}")
-            if len(self._active_titles) > 3:
-                active_items.append(f"  ... and {len(self._active_titles) - 3} more")
-            line += "\n" + "\n".join(active_items)
+        header = "  ".join(parts)
         
-        columns = shutil.get_terminal_size((80, 24)).columns
-        sys.stderr.write("\r\033[K" + fit_width(line, columns - 1))
+        # Active downloads with progress bars (max 4)
+        active_lines = []
+        for pos in sorted(self._active_titles.keys())[:4]:
+            title = self._active_titles[pos]
+            amount = self._active_amount.get(pos, "")
+            if len(title) > 45:
+                title = title[:42] + "..."
+            
+            # Create progress bar for this track
+            bar_width = 12
+            if amount.endswith("%"):
+                try:
+                    pct = int(amount.rstrip("%"))
+                    filled = int(bar_width * pct / 100)
+                except ValueError:
+                    filled = 0
+            else:
+                filled = 0
+            
+            bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
+            bar_empty = gray("-" * (bar_width - filled)) if Colors.enabled() else "-" * (bar_width - filled)
+            track_bar = bar_filled + bar_empty
+            
+            track_line = f"  {pos:02d} [{track_bar}] {amount} {title}"
+            active_lines.append(track_line)
+        
+        # Pad with empty lines if fewer than 4 active
+        while len(active_lines) < 4:
+            active_lines.append("")
+        
+        # Build all lines
+        lines = [header] + active_lines
+        
+        # Calculate number of lines to move cursor up
+        num_lines = 1 + 4  # header + 4 track lines
+        
+        # Use ANSI escape to move cursor up and redraw
+        # \r - carriage return, \033[K - clear line, \033[NA - move cursor up N lines
+        output = "\r\033[K" + "\n".join([header] + active_lines) + "\033[" + str(4) + "A"
+        sys.stderr.write(output)
         sys.stderr.flush()
 
     def _finish_progress(self):
