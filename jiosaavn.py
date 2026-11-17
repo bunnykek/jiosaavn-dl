@@ -342,12 +342,12 @@ def config_set(key, value):
             # Validate key
             valid_keys = {"output", "quality", "workers", "genre", "template",
                           "overwrite", "no_lyrics", "no_cover", "timeout",
-                          "max_speed", "proxy"}
+                          "max_speed", "proxy", "cache", "cache_ttl"}
             if key not in valid_keys:
                 print(f"Unknown config key: {key}. Valid keys: {', '.join(sorted(valid_keys))}", file=sys.stderr)
                 return 2
             # Convert value based on key type
-            if key in ("overwrite", "no_lyrics", "no_cover"):
+            if key in ("overwrite", "no_lyrics", "no_cover", "cache"):
                 if value.lower() in ("true", "1", "yes", "on"):
                     value = True
                 elif value.lower() in ("false", "0", "no", "off"):
@@ -368,6 +368,11 @@ def config_set(key, value):
                 value = float(value)
                 if not math.isfinite(value) or value <= 0:
                     print("timeout must be a positive number", file=sys.stderr)
+                    return 2
+            elif key == "cache_ttl":
+                value = int(value)
+                if value <= 0:
+                    print("cache_ttl must be a positive integer (seconds)", file=sys.stderr)
                     return 2
             elif key == "max_speed":
                 if value.lower() in ("none", "0", "unlimited"):

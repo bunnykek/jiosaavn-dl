@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Download and tag JioSaavn tracks, albums, and playlists."""
 
+import base64
 from html import unescape
 import json
 import os
@@ -212,6 +213,8 @@ def load_config():
         "timeout": 30,
         "max_speed": None,  # bytes/sec, None = unlimited
         "proxy": None,
+        "cache": False,
+        "cache_ttl": 86400,
     }
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -256,7 +259,8 @@ def reset_config():
         try:
             path.unlink()
         except FileNotFoundError:
-            pass
+            # Missing config is equivalent to reset.
+            path = None
         except OSError as exc:
             raise DownloadError(f"Cannot remove settings at {path}: {exc}.") from exc
         return previous or "Downloads"
@@ -744,7 +748,8 @@ class Jiosaavn:
                  genre=None, template=None, max_speed=None, proxy=None,
                  incremental=False, fallback_qualities=None, save_lyrics_file=False,
                  save_cover_file=False, post_hook=None, no_explicit=False,
-                 after_year=None, before_year=None, progress_style="single"):
+                 after_year=None, before_year=None, progress_style="single",
+                 cache=False, cache_ttl=86400):
         self.output = Path(output).expanduser()
         self.genre = normalize_genre(genre)
         self.workers = max(1, min(int(workers), MAX_WORKERS))
@@ -768,6 +773,11 @@ class Jiosaavn:
         self.after_year = after_year
         self.before_year = before_year
         self.progress_style = progress_style
+        self.cache = bool(cache)
+        try:
+            self.cache_ttl = max(int(cache_ttl), 0)
+        except (TypeError, ValueError):
+            self.cache_ttl = 86400
         self.progress_enabled = False
         self._progress_lock = threading.Lock()
         self._progress_total = 0
@@ -802,6 +812,9 @@ class Jiosaavn:
         self._cdn_url_cache = {}
         self._cover_cache = {}
         self._lyrics_cache = {}
+        # Optional persistent on-disk cache (TTL, opt-in).
+        self._disk_cache_db_lock = threading.Lock()
+        self._disk_cache_db = None
         if self._provided_session:
             self._configure_session(self.session)
 
@@ -1328,11 +1341,126 @@ class Jiosaavn:
             raise DownloadError(f"JioSaavn: {data['error']}")
         return data
 
+    def _disk_cache_path(self):
+        if not self.cache or self.cache_ttl <= 0:
+            return None
+        try:
+            return config_path().parent / "api-cache.sqlite3"
+        except Exception:
+            return None
+
+    def _disk_cache_conn(self):
+        if not self.cache or self.cache_ttl <= 0:
+            return None
+        with self._disk_cache_db_lock:
+            conn = self._disk_cache_db
+            if conn is not None:
+                return conn
+            db_path = self._disk_cache_path()
+            if db_path is None:
+                return None
+            try:
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(db_path), timeout=5, check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS cache ("
+                    "ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, "
+                    "expires_at REAL NOT NULL, PRIMARY KEY(ns, key))")
+                self._disk_cache_db = conn
+                return conn
+            except Exception:
+                return None
+
+    @staticmethod
+    def _disk_cache_encode(value):
+        if isinstance(value, bytes):
+            return {"t": "b64", "v": base64.b64encode(value).decode("ascii")}
+        return {"t": "json", "v": value}
+
+    @staticmethod
+    def _disk_cache_decode(payload):
+        t = payload.get("t")
+        v = payload.get("v")
+        if t == "b64":
+            try:
+                return base64.b64decode(v.encode("ascii"))
+            except Exception:
+                return None
+        if t == "json":
+            return v
+        return None
+
+    def _disk_cache_get(self, namespace, key):
+        if not self.cache or self.cache_ttl <= 0:
+            return False, None
+        conn = self._disk_cache_conn()
+        if conn is None:
+            return False, None
+        now = time.time()
+        skey = json.dumps(key, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        with self._disk_cache_db_lock:
+            try:
+                row = conn.execute(
+                    "SELECT value, expires_at FROM cache WHERE ns=? AND key=?",
+                    (namespace, skey)).fetchone()
+            except Exception:
+                return False, None
+            if not row:
+                return False, None
+            raw, expires_at = row
+            if expires_at <= now:
+                try:
+                    conn.execute("DELETE FROM cache WHERE ns=? AND key=?", (namespace, skey))
+                    conn.commit()
+                except (sqlite3.Error, OSError):
+                    # Best-effort expired-entry cleanup.
+                    return False, None
+                return False, None
+        try:
+            payload = json.loads(raw)
+            value = self._disk_cache_decode(payload)
+        except Exception:
+            return False, None
+        if value is None and payload.get("t") != "json":
+            return False, None
+        return True, value
+
+    def _disk_cache_set(self, namespace, key, value, ttl=None):
+        if not self.cache or self.cache_ttl <= 0:
+            return
+        conn = self._disk_cache_conn()
+        if conn is None:
+            return
+        ttl = self.cache_ttl if ttl is None else max(int(ttl), 0)
+        if ttl <= 0:
+            return
+        skey = json.dumps(key, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        try:
+            raw = json.dumps(self._disk_cache_encode(value), separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            return
+        expires_at = time.time() + ttl
+        with self._disk_cache_db_lock:
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO cache(ns, key, value, expires_at) VALUES(?,?,?,?)",
+                    (namespace, skey, raw, expires_at))
+                conn.commit()
+            except Exception:
+                return
+
     def metadata(self, kind, token, page=None):
         cache_key = (kind, token, page)
         with self._cache_lock:
             cached = self._metadata_cache.get(cache_key)
         if cached is not None:
+            return cached
+        hit, cached = self._disk_cache_get("metadata", [kind, token, page])
+        if hit and isinstance(cached, dict):
+            with self._cache_lock:
+                self._metadata_cache[cache_key] = cached
             return cached
         params = {"token": token, "type": kind, "n": COLLECTION_PAGE_SIZE}
         if page is not None:
@@ -1340,6 +1468,7 @@ class Jiosaavn:
         data = self.api("webapi.get", **params)
         with self._cache_lock:
             self._metadata_cache[cache_key] = data
+        self._disk_cache_set("metadata", [kind, token, page], data)
         return data
 
     @staticmethod
@@ -1383,7 +1512,7 @@ class Jiosaavn:
         try:
             return self.api("artist.getAlbums", artist_id=artist_id, p=page, n=limit)
         except DownloadError:
-            pass  # Fall through to search-based approach
+            data = None  # Fall through to search-based approach
 
         # Fallback: Search for songs by artist_id/name, extract unique album URLs
         # Use artist_id as search query - could be a name or ID
@@ -1498,6 +1627,15 @@ class Jiosaavn:
             if cached[1] != self.quality:
                 self._warning(f"  Falling back to {cached[1]} kbps (requested {self.quality} kbps unavailable)")
             return cached[0]
+        hit, cached = self._disk_cache_get("auth", [encurl, qualities])
+        if hit and isinstance(cached, (list, tuple)) and len(cached) == 2:
+            resolved, used_quality = cached[0], str(cached[1])
+            if isinstance(resolved, str) and resolved.startswith(("https://", "http://")):
+                with self._cache_lock:
+                    self._cdn_url_cache[cache_key] = (resolved, used_quality)
+                if used_quality != self.quality:
+                    self._warning(f"  Falling back to {used_quality} kbps (requested {self.quality} kbps unavailable)")
+                return resolved
 
         last_error = None
         for quality in qualities:
@@ -1520,6 +1658,9 @@ class Jiosaavn:
                 resolved = parts._replace(netloc=host).geturl()
                 with self._cache_lock:
                     self._cdn_url_cache[cache_key] = (resolved, quality)
+                # Auth URLs can expire; cap disk TTL to avoid stale entries.
+                auth_ttl = min(self.cache_ttl, 3600) if self.cache_ttl else 3600
+                self._disk_cache_set("auth", [encurl, qualities], [resolved, quality], ttl=auth_ttl)
                 if quality != self.quality:
                     self._warning(f"  Falling back to {quality} kbps (requested {self.quality} kbps unavailable)")
                 return resolved
@@ -1766,7 +1907,8 @@ class Jiosaavn:
                 if disc_num > 0:
                     audio["disk"] = [(disc_num, total_discs)]
             except (ValueError, TypeError):
-                pass
+                # Invalid disc metadata; skip disc tag.
+                audio.pop("disk", None)
 
         # Add compilation flag if available
         compilation = song.get("compilation") or song.get("is_compilation")
@@ -1784,13 +1926,20 @@ class Jiosaavn:
                 if lyrics_pending:
                     lrc_text, lyrics_text = cached_lyrics if isinstance(cached_lyrics, tuple) else (None, cached_lyrics)
                 else:
-                    lyrics = self.api("lyrics.getLyrics", lyrics_id=lyrics_id, api_version="4")
-                    lrc_text, lyrics_text = _lyrics_to_lrc(lyrics)
-                    # Fallback: plain lyrics from common fields if helper found nothing
-                    if not lyrics_text and not lrc_text and lyrics.get("lyrics"):
-                        lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", str(lyrics["lyrics"]))).strip() or None
-                    with self._cache_lock:
-                        self._lyrics_cache[lyrics_id] = (lrc_text, lyrics_text)
+                    hit, cached = self._disk_cache_get("lyrics", [lyrics_id])
+                    if hit and isinstance(cached, (list, tuple)) and len(cached) == 2:
+                        lrc_text, lyrics_text = cached[0], cached[1]
+                        with self._cache_lock:
+                            self._lyrics_cache[lyrics_id] = (lrc_text, lyrics_text)
+                    else:
+                        lyrics = self.api("lyrics.getLyrics", lyrics_id=lyrics_id, api_version="4")
+                        lrc_text, lyrics_text = _lyrics_to_lrc(lyrics)
+                        # Fallback: plain lyrics from common fields if helper found nothing
+                        if not lyrics_text and not lrc_text and lyrics.get("lyrics"):
+                            lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", str(lyrics["lyrics"]))).strip() or None
+                        with self._cache_lock:
+                            self._lyrics_cache[lyrics_id] = (lrc_text, lyrics_text)
+                        self._disk_cache_set("lyrics", [lyrics_id], [lrc_text, lyrics_text])
                 embedded = lyrics_text or (lrc_text and re.sub(r"\[[^\]]+\]\s*", "", lrc_text).strip()) or None
                 if embedded:
                     audio["\xa9lyr"] = embedded
@@ -1998,7 +2147,8 @@ class Jiosaavn:
                         self._library_ids[track_id] = (path_str, cur_mtime, st.st_size)
                 self._library_record_track(track_id, p)
             except OSError:
-                pass
+                # Best-effort refresh; in-memory stat may be stale.
+                return True
             return True
         return False
 
@@ -2073,7 +2223,8 @@ class Jiosaavn:
                                 return destination, False
                             return destination, True
                     except (MutagenError, OSError, ValueError):
-                        pass
+                        # Unreadable/invalid file at destination; treat as conflict-free.
+                        conflict = conflict
             chosen = destination
             if conflict:
                 stem = f"{destination.stem} [{safe_name(track_id)}]"
@@ -2187,16 +2338,23 @@ class Jiosaavn:
         if cached_art is not None:
             artwork = cached_art
         else:
-            try:
-                with self.request(cover_url) as response:
-                    artwork = response.content
-                if not artwork.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")):
-                    raise DownloadError("Invalid cover image.")
+            hit, cached_art = self._disk_cache_get("cover", [cover_url])
+            if hit and isinstance(cached_art, (bytes, bytearray)):
+                artwork = bytes(cached_art)
                 with self._cache_lock:
                     self._cover_cache[cover_url] = artwork
-            except Exception as exc:
-                self._warning(f"  Warning: cover unavailable: {exc}")
-                return None
+            else:
+                try:
+                    with self.request(cover_url) as response:
+                        artwork = response.content
+                    if not artwork.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")):
+                        raise DownloadError("Invalid cover image.")
+                    with self._cache_lock:
+                        self._cover_cache[cover_url] = artwork
+                    self._disk_cache_set("cover", [cover_url], artwork)
+                except Exception as exc:
+                    self._warning(f"  Warning: cover unavailable: {exc}")
+                    return None
         if self.save_cover_file:
             cover_path = directory / "folder.jpg"
             if not cover_path.exists():
@@ -2214,6 +2372,11 @@ class Jiosaavn:
         with self._cache_lock:
             if lyrics_id in self._lyrics_cache:
                 return
+        hit, cached = self._disk_cache_get("lyrics", [lyrics_id])
+        if hit and isinstance(cached, (list, tuple)) and len(cached) == 2:
+            with self._cache_lock:
+                self._lyrics_cache.setdefault(lyrics_id, (cached[0], cached[1]))
+            return
         try:
             lyrics = self.api("lyrics.getLyrics", lyrics_id=lyrics_id, api_version="4")
             lrc_text, lyrics_text = _lyrics_to_lrc(lyrics)
@@ -2221,6 +2384,7 @@ class Jiosaavn:
                 lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", str(lyrics["lyrics"]))).strip() or None
             with self._cache_lock:
                 self._lyrics_cache.setdefault(lyrics_id, (lrc_text, lyrics_text))
+            self._disk_cache_set("lyrics", [lyrics_id], [lrc_text, lyrics_text])
         except Exception as exc:
             # Cache miss result so tagging does not retry (avoids extra API burst).
             with self._cache_lock:
@@ -2454,6 +2618,13 @@ class Jiosaavn:
                 worker_session.close()
             # Clear folder index cache to prevent memory leak across collections
             self._folder_ids.clear()
+            with self._disk_cache_db_lock:
+                if self._disk_cache_db is not None:
+                    try:
+                        self._disk_cache_db.close()
+                    except (sqlite3.Error, OSError):
+                        self._disk_cache_db = None
+                    self._disk_cache_db = None
 
     def process_artist(self, artist_id):
         """Download all albums for an artist.
