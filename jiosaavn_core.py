@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -790,6 +791,11 @@ class Jiosaavn:
         self._folder_ids = {}
         # Song IDs being downloaded right now, per folder: {directory: {id: path}}.
         self._folder_claims = {}
+        # Persistent library index (track ID -> path/mtime/size) to avoid
+        # rescanning/tag-reading unchanged files across runs and collections.
+        self._library_ids = None  # {track_id: (path, mtime_ns, size)}
+        self._library_index_scanned = False
+        self._library_index_lock = threading.Lock()
         # Per-run caches to minimize redundant network/API requests.
         self._cache_lock = threading.Lock()
         self._metadata_cache = {}
@@ -1845,6 +1851,7 @@ class Jiosaavn:
             if (not self.overwrite and claims is not None
                     and claims.get(track_id) == path):
                 del claims[track_id]
+        self._library_record_track(track_id, path)
 
     def _release_track(self, directory, path, track_id):
         """Release a claim when a dry run or failed download leaves no saved file."""
@@ -1852,6 +1859,176 @@ class Jiosaavn:
             claims = self._folder_claims.get(directory)
             if claims is not None and claims.get(track_id) == path:
                 del claims[track_id]
+
+    def _library_index_db_path(self):
+        """Path to the persistent library index database."""
+        try:
+            return config_path().parent / "library-index.sqlite3"
+        except Exception:
+            return None
+
+    def _library_db_connect(self, db_path):
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS tracks ("
+            "output TEXT NOT NULL, track_id TEXT NOT NULL, path TEXT NOT NULL, "
+            "mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL, "
+            "PRIMARY KEY(output, track_id))")
+        return conn
+
+    def _ensure_library_index(self):
+        """Load/build the per-output library ID index once for this run.
+
+        Cached entries are validated by mtime/size; only changed/new files are
+        tag-read. This avoids rescanning the whole output tree per track and
+        avoids re-reading unchanged tags across runs.
+        """
+        with self._library_index_lock:
+            if self._library_index_scanned:
+                return self._library_ids or {}
+            self._library_index_scanned = True
+            ids = {}
+            output_root = str(self.output.resolve())
+            db_path = self._library_index_db_path()
+            conn = None
+            db_rows = {}
+            try:
+                if db_path is not None:
+                    db_path.parent.mkdir(parents=True, exist_ok=True)
+                    conn = self._library_db_connect(db_path)
+                    for track_id, rel, mtime_ns, size in conn.execute(
+                            "SELECT track_id, path, mtime_ns, size FROM tracks WHERE output=?",
+                            (output_root,)):
+                        db_rows[track_id] = (rel, mtime_ns, size)
+            except Exception:
+                conn = None
+                db_rows = {}
+
+            # Build reverse map path->(track_id,mtime,size) from DB for validation.
+            path_to_db = {}
+            for tid, (p, m, sz) in db_rows.items():
+                path_to_db[p] = (tid, m, sz)
+
+            try:
+                if self.output.is_dir():
+                    for root, _dirs, files in os.walk(self.output):
+                        for name in files:
+                            if not name.lower().endswith(".m4a"):
+                                continue
+                            file_path = Path(root) / name
+                            try:
+                                st = file_path.stat()
+                            except OSError:
+                                continue
+                            abs_path = str(file_path.resolve())
+                            mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+                            size = st.st_size
+                            cached = path_to_db.get(abs_path)
+                            track_id = None
+                            if cached and cached[1] == mtime_ns and cached[2] == size:
+                                track_id = cached[0]
+                            else:
+                                track_id = self._tagged_song_id(file_path)
+                                if track_id:
+                                    updates.append((track_id, abs_path, mtime_ns, size))
+                            if track_id:
+                                ids[track_id] = (abs_path, mtime_ns, size)
+                                seen_tracks.add(track_id)
+            except OSError:
+                ids = {}
+
+            # Remove DB rows for tracks no longer present at cached path in this output.
+            if conn is not None:
+                try:
+                    stale = [tid for tid in db_rows.keys() if tid not in seen_tracks]
+                    for tid in stale:
+                        conn.execute("DELETE FROM tracks WHERE output=? AND track_id=?",
+                                     (output_root, tid))
+                    for track_id, rel, mtime_ns, size in updates:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO tracks(output, track_id, path, mtime_ns, size) "
+                            "VALUES(?,?,?,?,?)",
+                            (output_root, track_id, rel, mtime_ns, size))
+                    conn.commit()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+            self._library_ids = ids
+            return ids
+
+    def _library_has_track(self, track_id):
+        """Return True if `track_id` exists in the output library (cached/persistent)."""
+        if not track_id:
+            return False
+        ids = self._ensure_library_index()
+        entry = ids.get(track_id)
+        if entry is None:
+            return False
+        path_str, mtime_ns, size = entry
+        p = Path(path_str)
+        try:
+            st = p.stat()
+            cur_mtime = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+            if cur_mtime == mtime_ns and st.st_size == size:
+                return True
+            # File changed; re-read tag.
+            current_id = self._tagged_song_id(p)
+        except OSError:
+            current_id = None
+        with self._library_index_lock:
+            if self._library_ids is not None:
+                self._library_ids.pop(track_id, None)
+        if current_id == track_id:
+            # refresh
+            try:
+                st = p.stat()
+                cur_mtime = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+                with self._library_index_lock:
+                    if self._library_ids is not None:
+                        self._library_ids[track_id] = (path_str, cur_mtime, st.st_size)
+                self._library_record_track(track_id, p)
+            except OSError:
+                pass
+            return True
+        return False
+
+    def _library_record_track(self, track_id, path):
+        """Record a saved track in the persistent library index."""
+        if not track_id:
+            return
+        try:
+            st = path.stat()
+            mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+            size = st.st_size
+            abs_path = str(path.resolve())
+        except OSError:
+            return
+        with self._library_index_lock:
+            if self._library_ids is not None:
+                self._library_ids[track_id] = (abs_path, mtime_ns, size)
+        db_path = self._library_index_db_path()
+        if db_path is None:
+            return
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = self._library_db_connect(db_path)
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO tracks(output, track_id, path, mtime_ns, size) "
+                    "VALUES(?,?,?,?,?)",
+                    (str(self.output.resolve()), str(track_id), abs_path, mtime_ns, size))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass
 
     def _existing_destination(self, directory, destination, track_id, overwrite=False):
         """Return an existing path or reserve a destination for this song ID.
@@ -2092,41 +2269,26 @@ class Jiosaavn:
 
     def _filter_existing_tracks(self, songs, kind):
         """Filter out tracks that already exist based on song ID.
-        Returns list of songs that don't exist yet."""
+
+        Uses a persistent library ID index (validated by mtime/size) so the
+        output tree is scanned once per run instead of once per track.
+        """
         if not songs:
             return songs
-
-        # Collect all unique folders that would be used for these tracks
-        # We need to check each track's destination folder
         filtered = []
         for song in songs:
-            track_id = clean_text(song.get("id") or song.get("perma_url", "").split("/")[-1])
+            track_id = clean_text(song.get("id"))
             if not track_id:
-                # Can't determine ID, keep the track
+                # No stable ID in collection payload; keep it (downstream will
+                # resolve/skip as needed).
                 filtered.append(song)
                 continue
-
-            # We need to check if this track ID exists anywhere in the output directory
-            # Since we don't know the exact folder without processing the track,
-            # we'll do a broad search across all subdirectories
-            found = False
             try:
-                for folder in self.output.iterdir():
-                    if not folder.is_dir():
-                        continue
-                    for existing_file in folder.glob("*.m4a"):
-                        existing_id = self._tagged_song_id(existing_file)
-                        if existing_id == track_id:
-                            found = True
-                            break
-                    if found:
-                        break
-            except OSError:
-                pass
-
+                found = self._library_has_track(track_id)
+            except Exception:
+                found = False
             if not found:
                 filtered.append(song)
-
         return filtered
 
     def process_collection(self, kind, token):
