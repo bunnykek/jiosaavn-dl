@@ -601,6 +601,8 @@ class Jiosaavn:
         """Redraw the progress display. The caller must hold self._progress_lock."""
         if self.progress_style == "detailed":
             self._write_detailed_progress()
+        elif self.progress_style == "compact":
+            self._write_compact_progress()
         else:
             self._write_single_progress()
 
@@ -704,6 +706,72 @@ class Jiosaavn:
         # Clear screen and redraw
         output = "\r\033[K" + "\n".join(lines)
         sys.stderr.write(output)
+        sys.stderr.flush()
+
+    def _write_compact_progress(self):
+        """Redraw the compact progress display. The caller must hold self._progress_lock."""
+        elapsed = max(0, int(time.monotonic() - self._collection_started_at))
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        # Global indicator: downloaded/total with active count
+        active_count = len(self._active_titles)
+        progress_text = bold(f"{self._progress_done}/{self._progress_total}") if Colors.enabled() else f"{self._progress_done}/{self._progress_total}"
+        if active_count:
+            active_text = cyan(f" ({active_count} downloading)") if Colors.enabled() else f" ({active_count} downloading)"
+            progress_text += active_text
+        
+        speed_text = cyan(self._progress_speed) if Colors.enabled() else self._progress_speed
+        elapsed_text = blue(f"{hours}:{minutes:02d}:{seconds:02d}") if Colors.enabled() else f"{hours}:{minutes:02d}:{seconds:02d}"
+        
+        # Global progress bar (compact)
+        bar_width = 20
+        total = max(self._progress_total, 1)
+        filled = int(bar_width * self._progress_done / total)
+        bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
+        bar_empty = gray("-" * (bar_width - filled)) if Colors.enabled() else "-" * (bar_width - filled)
+        overall_bar = bar_filled + bar_empty
+        
+        # Build compact status line
+        parts = [
+            f"Downloading {bold(f'{self._progress_done}/{self._progress_total}') if Colors.enabled() else f'{self._progress_done}/{self._progress_total}'}"
+        ]
+        if active_count:
+            parts.append(cyan(f"({active_count} active)") if Colors.enabled() else f"({active_count} active)")
+        parts.append(f"[{green('#' * int(20 * self._progress_done / max(self._progress_total, 1))) if Colors.enabled() else '#' * int(20 * self._progress_done / max(self._progress_total, 1))}{'-' * (20 - int(20 * self._progress_done / max(self._progress_total, 1)))}]")
+        parts.append(speed_text)
+        parts.append(f"Elapsed {blue(f'{hours}:{minutes:02d}:{seconds:02d}') if Colors.enabled() else f'{hours}:{minutes:02d}:{seconds:02d}'}")
+        
+        remaining = self._progress_total - self._progress_done
+        if self._progress_done >= 2 and remaining > 0:
+            eta = int(elapsed * remaining / self._progress_done)
+            eta_hours, eta_remainder = divmod(eta, 3600)
+            eta_minutes, eta_seconds = divmod(eta_remainder, 60)
+            if eta_hours:
+                eta_text = f"{eta_hours}h{eta_minutes}m"
+            elif eta_minutes:
+                eta_text = f"{eta_minutes}m{eta_seconds}s"
+            else:
+                eta_text = f"{eta_seconds}s"
+            parts.append(yellow(f"ETA {eta_text}") if Colors.enabled() else f"ETA {eta_text}")
+        
+        line = "  ".join(parts)
+        
+        # Show active downloads (max 3) on next line
+        if self._active_titles:
+            active_items = []
+            for pos in sorted(self._active_titles.keys())[:3]:
+                title = self._active_titles[pos]
+                amount = self._active_amount.get(pos, "")
+                if len(title) > 40:
+                    title = title[:37] + "..."
+                active_items.append(f"  {pos:02d} {amount} {title}")
+            if len(self._active_titles) > 3:
+                active_items.append(f"  ... and {len(self._active_titles) - 3} more")
+            line += "\n" + "\n".join(active_items)
+        
+        columns = shutil.get_terminal_size((80, 24)).columns
+        sys.stderr.write("\r\033[K" + fit_width(line, columns - 1))
         sys.stderr.flush()
 
     def _finish_progress(self):
