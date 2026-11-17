@@ -581,6 +581,12 @@ class Jiosaavn:
         self._folder_ids = {}
         # Song IDs being downloaded right now, per folder: {directory: {id: path}}.
         self._folder_claims = {}
+        # Per-run caches to minimize redundant network/API requests.
+        self._cache_lock = threading.Lock()
+        self._metadata_cache = {}
+        self._cdn_url_cache = {}
+        self._cover_cache = {}
+        self._lyrics_cache = {}
         if self._provided_session:
             self._configure_session(self.session)
 
@@ -1021,9 +1027,17 @@ class Jiosaavn:
         retries = _RetryWithRetryAfter(total=3, backoff_factor=0.5,
                                        status_forcelist=(429, 500, 502, 503, 504),
                                        allowed_methods=frozenset(("GET",)))
-        session.mount("https://", HTTPAdapter(max_retries=retries))
+        adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         if self.proxy:
             session.proxies = {"http": self.proxy, "https": self.proxy}
+        session.headers.setdefault("User-Agent",
+                                   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                                   "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        session.headers.setdefault("Accept", "application/json, text/plain, */*")
+        session.headers.setdefault("Accept-Language", "en-US,en;q=0.9")
+        session.headers.setdefault("Referer", "https://www.jiosaavn.com/")
 
     def _new_session(self):
         session = requests.Session()
@@ -1100,10 +1114,18 @@ class Jiosaavn:
         return data
 
     def metadata(self, kind, token, page=None):
+        cache_key = (kind, token, page)
+        with self._cache_lock:
+            cached = self._metadata_cache.get(cache_key)
+        if cached is not None:
+            return cached
         params = {"token": token, "type": kind, "n": COLLECTION_PAGE_SIZE}
         if page is not None:
             params["p"] = page
-        return self.api("webapi.get", **params)
+        data = self.api("webapi.get", **params)
+        with self._cache_lock:
+            self._metadata_cache[cache_key] = data
+        return data
 
     @staticmethod
     def _normalize_album_title(title):
@@ -1254,6 +1276,13 @@ class Jiosaavn:
         # Deduplicate while preserving order
         seen = set()
         qualities = [q for q in qualities if not (q in seen or seen.add(q))]
+        cache_key = (encurl, tuple(qualities))
+        with self._cache_lock:
+            cached = self._cdn_url_cache.get(cache_key)
+        if cached is not None:
+            if cached[1] != self.quality:
+                self._warning(f"  Falling back to {cached[1]} kbps (requested {self.quality} kbps unavailable)")
+            return cached[0]
 
         last_error = None
         for quality in qualities:
@@ -1273,9 +1302,12 @@ class Jiosaavn:
                     # Fallback: replace first occurrence of "web" with "aac"
                     host = host.replace("web", "aac", 1)
                 # If host didn't change, assume it's already a direct CDN URL
+                resolved = parts._replace(netloc=host).geturl()
+                with self._cache_lock:
+                    self._cdn_url_cache[cache_key] = (resolved, quality)
                 if quality != self.quality:
                     self._warning(f"  Falling back to {quality} kbps (requested {self.quality} kbps unavailable)")
-                return parts._replace(netloc=host).geturl()
+                return resolved
             except DownloadError as exc:
                 last_error = exc
                 if "unavailable" in str(exc).lower() or "not available" in str(exc).lower():
@@ -1490,10 +1522,21 @@ class Jiosaavn:
             audio["cpil"] = [1]
 
         if self.lyrics and is_true(song.get("has_lyrics")) and song.get("id"):
+            lyrics_id = song["id"]
+            with self._cache_lock:
+                cached_lyrics = self._lyrics_cache.get(lyrics_id)
+                lyrics_pending = lyrics_id in self._lyrics_cache
             try:
-                lyrics = self.api("lyrics.getLyrics", lyrics_id=song["id"], api_version="4")
-                if lyrics.get("lyrics"):
-                    lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", lyrics["lyrics"]))
+                if lyrics_pending:
+                    lyrics_text = cached_lyrics
+                else:
+                    lyrics = self.api("lyrics.getLyrics", lyrics_id=lyrics_id, api_version="4")
+                    lyrics_text = None
+                    if lyrics.get("lyrics"):
+                        lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", lyrics["lyrics"]))
+                    with self._cache_lock:
+                        self._lyrics_cache[lyrics_id] = lyrics_text
+                if lyrics_text:
                     audio["\xa9lyr"] = lyrics_text
                     # Save lyrics as separate .lrc file if requested
                     if self.save_lyrics_file:
@@ -1715,17 +1758,25 @@ class Jiosaavn:
         if self.cover and song.get("image"):
             try:
                 cover_url = song["image"].replace("150x150", "500x500")
-                with self.request(cover_url) as response:
-                    artwork = response.content
-                if not artwork.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")):
-                    raise DownloadError("Invalid cover image.")
+                with self._cache_lock:
+                    cached_art = self._cover_cache.get(cover_url)
+                if cached_art is not None:
+                    artwork = cached_art
+                else:
+                    with self.request(cover_url) as response:
+                        artwork = response.content
+                    if not artwork.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")):
+                        raise DownloadError("Invalid cover image.")
+                    with self._cache_lock:
+                        self._cover_cache[cover_url] = artwork
                 # Save cover art as folder.jpg if requested
                 if self.save_cover_file:
                     cover_path = directory / "folder.jpg"
-                    try:
-                        cover_path.write_bytes(artwork)
-                    except OSError as exc:
-                        self._warning(f"  Warning: Could not save cover file: {exc}")
+                    if not cover_path.exists():
+                        try:
+                            cover_path.write_bytes(artwork)
+                        except OSError as exc:
+                            self._warning(f"  Warning: Could not save cover file: {exc}")
             except DownloadError as exc:
                 artwork = None
                 self._warning(f"  Warning: cover unavailable: {exc}")
