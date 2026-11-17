@@ -1952,13 +1952,16 @@ class Jiosaavn:
                             "VALUES(?,?,?,?,?)",
                             (output_root, track_id, rel, mtime_ns, size))
                     conn.commit()
-                except Exception:
-                    pass
+                except (sqlite3.Error, OSError):
+                    # Persistent index is a best-effort cache; ignore write failures.
+                    conn = None
                 finally:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except (sqlite3.Error, OSError):
+                            # Best-effort cache handle; safe to ignore close failures.
+                            conn = None
 
             self._library_ids = ids
             return ids
@@ -2027,8 +2030,9 @@ class Jiosaavn:
                 conn.commit()
             finally:
                 conn.close()
-        except Exception:
-            pass
+        except (sqlite3.Error, OSError):
+            # Persistent index is a best-effort cache; ignore write failures.
+            return
 
     def _existing_destination(self, directory, destination, track_id, overwrite=False):
         """Return an existing path or reserve a destination for this song ID.
