@@ -296,6 +296,8 @@ def build_parser():
                             help="process multiple URLs concurrently (1-4, default 1)")
         parser.add_argument("--progress-style", choices=("single", "detailed"), default="detailed",
                             help="progress display style: 'single' (single line) or 'detailed' (multi-line per track, default)")
+        parser.add_argument("--force-progress", action="store_true",
+                            help="force progress bar display even when stderr is not a TTY")
         parser.add_argument("--post-hook", metavar="CMD",
                             help="run CMD after each successful download (receives file path as argument)")
         parser.add_argument("--no-explicit", action="store_true",
@@ -555,7 +557,7 @@ def main(argv=None):
                           after_year=args.after_year,
                           before_year=args.before_year,
                           progress_style=args.progress_style)
-        client.progress_enabled = not args.quiet and sys.stderr.isatty()
+        client.progress_enabled = not args.quiet and (sys.stderr.isatty() or args.force_progress)
         saved_failed = 0
         try:
             if args.interactive:
