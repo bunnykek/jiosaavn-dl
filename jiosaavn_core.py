@@ -603,6 +603,8 @@ class Jiosaavn:
             self._write_detailed_progress()
         elif self.progress_style == "compact":
             self._write_compact_progress()
+        elif self.progress_style == "pulse":
+            self._write_pulse_progress()
         else:
             self._write_single_progress()
 
@@ -801,6 +803,105 @@ class Jiosaavn:
         # \r - carriage return, \033[K - clear line, \033[NA - move cursor up N lines
         output = "\r\033[K" + "\n".join([header] + active_lines) + "\033[" + str(4) + "A"
         sys.stderr.write(output)
+        sys.stderr.flush()
+
+    def _write_pulse_progress(self):
+        """Redraw the pulse-style progress display (yt-dlp style). The caller must hold self._progress_lock."""
+        elapsed = max(0, int(time.monotonic() - self._collection_started_at))
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        # Current status based on what's happening
+        status = "Downloading"
+        if self._active_titles:
+            first_pos = min(self._active_titles.keys())
+            title = self._active_titles[first_pos]
+            if len(title) > 40:
+                title = title[:37] + "..."
+            status = f"Downloading {title}"
+        else:
+            status = "Downloading"
+        
+        # Global progress
+        total = max(self._progress_total, 1)
+        progress_pct = self._progress_done / total
+        filled = int(40 * self._progress_done / max(self._progress_total, 1))
+        
+        # Build pulse bar with Unicode characters
+        filled_bar = "━" * filled
+        if filled < 40:
+            arrow = "╸"
+            empty_bar = " " * (40 - filled - 1)
+        else:
+            arrow = ""
+            empty_bar = ""
+        
+        bar_str = filled_bar + arrow + empty_bar
+        
+        # Percentage
+        pct = int(self._progress_done / max(self._progress_total, 1) * 100)
+        
+        # ETA
+        elapsed_time = max(0, int(time.monotonic() - self._collection_started_at))
+        remaining = self._progress_total - self._progress_done
+        if self._progress_done >= 2 and remaining > 0:
+            eta = int(elapsed * remaining / self._progress_done)
+            eta_hours, eta_remainder = divmod(eta, 3600)
+            eta_minutes, eta_seconds = divmod(eta_remainder, 60)
+            if eta_hours:
+                eta_text = f"{eta_hours}h{eta_minutes}m"
+            elif eta_minutes:
+                eta_text = f"{eta_minutes}m{eta_seconds}s"
+            else:
+                eta_text = f"{eta_seconds}s"
+            eta_str = f"  ETA {eta_text}"
+        else:
+            eta_str = ""
+        
+        # Build pulse bar
+        filled = int(40 * self._progress_done / max(self._progress_total, 1))
+        if filled < 40:
+            arrow = "╸"
+            empty_bar = " " * (40 - filled - 1)
+            bar_str = "━" * filled + "╸" + " " * (40 - filled - 1)
+        else:
+            bar_str = "━" * 40
+        
+        pct = int(self._progress_done / max(self._progress_total, 1) * 100)
+        
+        # Build the pulse-style line
+        bar_colored = green(bar_str) if Colors.enabled() else bar_str
+        pct_str = f"{pct}%"
+        status_text = f" {bold('Downloading') if Colors.enabled() else 'Downloading'}"
+        
+        # ETA
+        elapsed_time = max(0, int(time.monotonic() - self._collection_started_at))
+        remaining = self._progress_total - self._progress_done
+        if self._progress_done >= 2 and remaining > 0:
+            eta = int(elapsed * remaining / self._progress_done)
+            eta_hours, eta_remainder = divmod(eta, 3600)
+            eta_minutes, eta_seconds = divmod(eta_remainder, 60)
+            if eta_hours:
+                eta_text = f"{eta_hours}h{eta_minutes}m"
+            elif eta_minutes:
+                eta_text = f"{eta_minutes}m{eta_seconds}s"
+            else:
+                eta_text = f"{eta_seconds}s"
+            eta_str = f"  ETA {eta_text}"
+        else:
+            eta_str = ""
+        
+        # Build the pulse-style line
+        bar_colored = green("━" * filled + ("╸" if filled < 40 else "") + " " * max(0, 40 - filled - 1)) if Colors.enabled() else ("━" * filled + ("╸" if filled < 40 else "") + " " * max(0, 40 - filled - 1))
+        
+        line = (
+            f" {bold('Downloading') if Colors.enabled() else 'Downloading'}"
+            f"  {bold(f'{pct}%') if Colors.enabled() else f'{pct}%'}"
+            f"  {green('━' * filled + ('╸' if filled < 40 else '') + ' ' * max(0, 40 - filled - 1)) if Colors.enabled() else ('━' * filled + ('╸' if filled < 40 else '') + ' ' * max(0, 40 - filled - 1))}"
+            f"{eta_str}"
+        )
+        
+        sys.stderr.write("\r\033[K" + line)
         sys.stderr.flush()
 
     def _finish_progress(self):
