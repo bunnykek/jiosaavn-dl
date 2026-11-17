@@ -286,6 +286,37 @@ def normalize_genre(value):
     return " ".join(str(value).split()) or None
 
 
+def track_genre(song):
+    """Return the best-effort genre string from JioSaavn track metadata.
+
+    Prefers explicit genre fields; falls back to other music-category fields
+    exposed by the API when present. Returns None when nothing usable is found.
+    """
+    if not isinstance(song, dict):
+        return None
+    for key in ("genre", "music", "music_genre", "primary_genre"):
+        value = normalize_genre(song.get(key))
+        if value:
+            return value
+    more = song.get("more_info")
+    if isinstance(more, dict):
+        for key in ("genre", "music", "music_genre"):
+            value = normalize_genre(more.get(key))
+            if value:
+                return value
+        genres = more.get("genres")
+        if isinstance(genres, list):
+            for item in genres:
+                value = normalize_genre(item)
+                if value:
+                    return value
+        elif isinstance(genres, str):
+            value = normalize_genre(genres)
+            if value:
+                return value
+    return None
+
+
 def _truncate_utf8(value, max_bytes):
     """Return the longest prefix of `value` that fits in `max_bytes`."""
     encoded = value.encode("utf-8")
@@ -1320,7 +1351,7 @@ class Jiosaavn:
     def _template_values(self, song, artists, isPlaylist, song_pos):
         """Build the placeholder map for the output template."""
         year = clean_text(song.get('year')) or "Unknown"
-        genre = self.genre or clean_text(song.get('genre')) or "Unknown"
+        genre = self.genre or track_genre(song) or "Unknown"
         playlist = safe_name(isPlaylist) if isPlaylist else "Unknown"
         return {
             "artist": artists,
@@ -1483,8 +1514,9 @@ class Jiosaavn:
                 audio[atom] = value
         audio["aART"] = clean_text(album_artist or song.get("primary_artists"))
         audio["trkn"] = [(pos, total)]
-        if self.genre:
-            audio["\xa9gen"] = self.genre
+        genre_value = self.genre or track_genre(song)
+        if genre_value:
+            audio["\xa9gen"] = genre_value
         audio["rtng"] = [4 if is_true(song.get("explicit_content")) else 2]
         track_id = song.get("id") or song_id
         if track_id:
