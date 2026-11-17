@@ -294,8 +294,8 @@ def build_parser():
                             help="save cover art as folder.jpg in the album/playlist folder")
         parser.add_argument("--parallel-urls", type=int, default=1, metavar="N",
                             help="process multiple URLs concurrently (1-4, default 1)")
-        parser.add_argument("--progress-style", choices=("single", "detailed", "compact", "pulse"), default="detailed",
-                            help="progress display style: 'single' (single line), 'detailed' (multi-line per track), 'compact' (concise with active downloads), or 'pulse' (yt-dlp style with Unicode bars)")
+        parser.add_argument("--progress-style", choices=("single", "detailed", "compact", "pulse"), default="compact",
+                            help="progress display style: 'single' (single line), 'detailed' (multi-line per track), 'compact' (concise with active downloads, default), or 'pulse' (yt-dlp style with Unicode bars)")
         parser.add_argument("--force-progress", action="store_true",
                             help="force progress bar display even when stderr is not a TTY")
         parser.add_argument("--post-hook", metavar="CMD",
