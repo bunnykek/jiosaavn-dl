@@ -477,7 +477,9 @@ def fit_width(text, width):
     width = max(width, 1)
     if display_width(text) <= width:
         return text
-    target = max(width - 1, 0)
+    ellipsis = "…"
+    ellipsis_width = 2 if unicodedata.east_asian_width(ellipsis) in ("W", "F", "A") else 1
+    target = max(width - ellipsis_width, 0)
     kept = []
     used = 0
     truncated = False
@@ -503,7 +505,6 @@ def fit_width(text, width):
             kept.append(char)
             i += 1
             continue
-        is_emoji = cat == "So"
         char_width = 2 if unicodedata.east_asian_width(char) in ("W", "F", "A") else 1
         if used + char_width > target:
             truncated = True
@@ -513,7 +514,12 @@ def fit_width(text, width):
         i += 1
     result = "".join(kept)
     if truncated:
-        result += "\033[0m…" if "\033[" in result else "…"
+        result += "\033[0m" + ellipsis if "\033[" in result else ellipsis
+        # Ensure the result never exceeds the requested width (e.g. when the
+        # ellipsis is treated as wide on ambiguous-width terminals).
+        while display_width(result) > width and kept:
+            kept.pop()
+            result = "".join(kept) + ("\033[0m" + ellipsis if "\033[" in "".join(kept) else ellipsis)
     return result
 
 
