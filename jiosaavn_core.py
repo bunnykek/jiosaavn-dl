@@ -2173,6 +2173,90 @@ class Jiosaavn:
             raise
         self._track_finished(song_pos, total_tracks, title, artists, "Downloaded")
 
+    def _fetch_cover(self, song, directory):
+        """Fetch and cache cover art for a track (best-effort)."""
+        if not (self.cover and song.get("image")):
+            return None
+        cover_url = song["image"].replace("150x150", "500x500")
+        with self._cache_lock:
+            cached_art = self._cover_cache.get(cover_url)
+        if cached_art is not None:
+            artwork = cached_art
+        else:
+            try:
+                with self.request(cover_url) as response:
+                    artwork = response.content
+                if not artwork.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")):
+                    raise DownloadError("Invalid cover image.")
+                with self._cache_lock:
+                    self._cover_cache[cover_url] = artwork
+            except Exception as exc:
+                self._warning(f"  Warning: cover unavailable: {exc}")
+                return None
+        if self.save_cover_file:
+            cover_path = directory / "folder.jpg"
+            if not cover_path.exists():
+                try:
+                    cover_path.write_bytes(artwork)
+                except OSError as exc:
+                    self._warning(f"  Warning: Could not save cover file: {exc}")
+        return artwork
+
+    def _prefetch_lyrics(self, song):
+        """Prefetch and cache lyrics for a track (best-effort)."""
+        if not (self.lyrics and is_true(song.get("has_lyrics")) and song.get("id")):
+            return
+        lyrics_id = song["id"]
+        with self._cache_lock:
+            if lyrics_id in self._lyrics_cache:
+                return
+        try:
+            lyrics = self.api("lyrics.getLyrics", lyrics_id=lyrics_id, api_version="4")
+            lrc_text, lyrics_text = _lyrics_to_lrc(lyrics)
+            if not lyrics_text and not lrc_text and lyrics.get("lyrics"):
+                lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", str(lyrics["lyrics"]))).strip() or None
+            with self._cache_lock:
+                self._lyrics_cache.setdefault(lyrics_id, (lrc_text, lyrics_text))
+        except Exception as exc:
+            # Cache miss result so tagging does not retry (avoids extra API burst).
+            with self._cache_lock:
+                self._lyrics_cache.setdefault(lyrics_id, (None, None))
+            self._warning(f"  Warning: lyrics unavailable: {exc}")
+
+    def _start_prefetch(self, song, directory):
+        """Start bounded cover/lyrics prefetch in parallel with audio download.
+
+        Uses a per-track pool (max 2 workers) to overlap metadata fetches with
+        chunked audio streaming. Requests remain bounded and use per-run caches,
+        so no extra API bursts are issued for already-cached data.
+        """
+        futures = {}
+        pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
+        try:
+            if self.cover and song.get("image"):
+                futures["cover"] = pool.submit(self._fetch_cover, song, directory)
+            if self.lyrics and is_true(song.get("has_lyrics")) and song.get("id"):
+                futures["lyrics"] = pool.submit(self._prefetch_lyrics, song)
+        except Exception:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        return pool, futures
+
+    @staticmethod
+    def _finish_prefetch(pool, futures):
+        if pool is None:
+            return {}
+        results = {}
+        try:
+            for name, future in futures.items():
+                try:
+                    results[name] = future.result()
+                except Exception:
+                    results[name] = None
+        finally:
+            pool.shutdown(wait=True, cancel_futures=False)
+        return results
+
     def _fetch_track(self, song, song_id, directory, destination, track_id,
                      album_artist, song_pos, total_tracks):
         """Download, tag and save one track to `destination`."""
@@ -2181,46 +2265,30 @@ class Jiosaavn:
             raise DownloadError("Audio is unavailable for this track (it may be restricted in your region).")
         directory.mkdir(parents=True, exist_ok=True)
         audio_url = self.getCdnURL(encrypted, fallback_qualities=self.fallback_qualities)
-        artwork = None
-        if self.cover and song.get("image"):
-            try:
-                cover_url = song["image"].replace("150x150", "500x500")
-                with self._cache_lock:
-                    cached_art = self._cover_cache.get(cover_url)
-                if cached_art is not None:
-                    artwork = cached_art
-                else:
-                    with self.request(cover_url) as response:
-                        artwork = response.content
-                    if not artwork.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")):
-                        raise DownloadError("Invalid cover image.")
-                    with self._cache_lock:
-                        self._cover_cache[cover_url] = artwork
-                # Save cover art as folder.jpg if requested
-                if self.save_cover_file:
-                    cover_path = directory / "folder.jpg"
-                    if not cover_path.exists():
-                        try:
-                            cover_path.write_bytes(artwork)
-                        except OSError as exc:
-                            self._warning(f"  Warning: Could not save cover file: {exc}")
-            except DownloadError as exc:
-                artwork = None
-                self._warning(f"  Warning: cover unavailable: {exc}")
-        partial = self.partial_path(destination)
-        self._track_progress_baseline(
-            song_pos, partial.stat().st_size if partial.exists() else 0)
-        temp = self.download_file(
-            audio_url, destination,
-            progress=lambda done, total: self._track_progress(song_pos, done, total))
+
+        # Prefetch cover/lyrics in parallel with chunked audio download (bounded).
+        pool, futures = self._start_prefetch(song, directory)
         try:
-            self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork,
-                        song_id=song_id)
-            temp.replace(destination)
-            self._discard_partials(destination)
-            self._remember_track(directory, destination, track_id)
+            partial = self.partial_path(destination)
+            self._track_progress_baseline(
+                song_pos, partial.stat().st_size if partial.exists() else 0)
+            temp = self.download_file(
+                audio_url, destination,
+                progress=lambda done, total: self._track_progress(song_pos, done, total))
+            prefetched = self._finish_prefetch(pool, futures)
+            pool = None
+            artwork = prefetched.get("cover")
+            try:
+                self.tagger(song, temp, album_artist, song_pos, total_tracks, artwork,
+                            song_id=song_id)
+                temp.replace(destination)
+                self._discard_partials(destination)
+                self._remember_track(directory, destination, track_id)
+            finally:
+                temp.unlink(missing_ok=True)
         finally:
-            temp.unlink(missing_ok=True)
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
         self._increment_counter("downloaded")
         self._status(f"  Saved: {destination}", verbose_only=self.progress_enabled)
         # Execute post-hook if configured
