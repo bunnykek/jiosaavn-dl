@@ -1328,10 +1328,6 @@ class Jiosaavn:
         """
         return path.with_name(f"{path.name}.{self.quality}.part")
 
-    def _partial_meta_path(self, path):
-        """Sidecar file storing ETag/Content-MD5 for resume validation."""
-        return self.partial_path(path).with_suffix(".part.meta")
-
     @staticmethod
     def _discard_partials(path):
         """Delete leftover partial downloads of `path` at any quality."""
@@ -1339,7 +1335,7 @@ class Jiosaavn:
         for partial in path.parent.glob("*.part"):
             if partial.name.startswith(prefix):
                 partial.unlink(missing_ok=True)
-                # Also remove sidecar meta file
+                # Remove stale sidecar meta files from older versions, if present.
                 meta = partial.with_suffix(".part.meta")
                 meta.unlink(missing_ok=True)
 
@@ -1349,23 +1345,9 @@ class Jiosaavn:
         `progress(done, total)`, if given, is called after each chunk with the
         bytes saved so far (including a resumed prefix) and the full file size,
         or None when the server does not say how large the file is.
-
-        Validates ETag/Content-MD5 on resume to prevent corrupted spliced files.
         """
         temp = self.partial_path(path)
-        meta_path = self._partial_meta_path(path)
         offset = temp.stat().st_size if temp.exists() else 0
-
-        # Load stored validators for resume validation
-        stored_etag = stored_md5 = None
-        if offset and meta_path.exists():
-            try:
-                import json
-                data = json.loads(meta_path.read_text(encoding="utf-8"))
-                stored_etag = data.get("etag")
-                stored_md5 = data.get("md5")
-            except (OSError, json.JSONDecodeError):
-                pass  # Corrupt/missing meta; will restart
 
         for attempt in range(2):
             request_options = {"stream": True}
@@ -1379,7 +1361,6 @@ class Jiosaavn:
                     if response.status_code == 416:
                         if attempt == 0 and offset:
                             temp.unlink(missing_ok=True)
-                            meta_path.unlink(missing_ok=True)
                             offset = 0
                             continue
                         raise DownloadError(
@@ -1387,29 +1368,12 @@ class Jiosaavn:
                             "the stale partial download was discarded. Retry the track."
                         )
 
-                    # Validate ETag/Content-MD5 on resume (206 Partial Content)
-                    if offset and response.status_code == 206:
-                        current_etag = response.headers.get("ETag", "").strip('"')
-                        current_md5 = response.headers.get("Content-MD5", "")
-                        if stored_etag and current_etag and stored_etag != current_etag:
-                            self._warning("  ETag mismatch on resume; restarting download.")
-                            temp.unlink(missing_ok=True)
-                            meta_path.unlink(missing_ok=True)
-                            offset = 0
-                            continue
-                        if stored_md5 and current_md5 and stored_md5 != current_md5:
-                            self._warning("  Content-MD5 mismatch on resume; restarting download.")
-                            temp.unlink(missing_ok=True)
-                            meta_path.unlink(missing_ok=True)
-                            offset = 0
-                            continue
-
-                    return self._save_response(temp, response, offset, progress, meta_path)
+                    return self._save_response(temp, response, offset, progress)
             except requests.RequestException as exc:
                 raise DownloadError(f"Download interrupted: {exc}") from exc
         raise DownloadError("The download could not be started.")
 
-    def _save_response(self, temp, response, offset, progress, meta_path=None):
+    def _save_response(self, temp, response, offset, progress):
         content_type = response.headers.get("Content-Type", "").lower()
         if "text/" in content_type or "json" in content_type:
             raise DownloadError("The server returned an error page instead of media.")
@@ -1420,20 +1384,14 @@ class Jiosaavn:
             match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
             if not match or int(match.group(1)) != offset or int(match.group(2)) < offset:
                 temp.unlink(missing_ok=True)
-                if meta_path:
-                    meta_path.unlink(missing_ok=True)
                 raise DownloadError("The server returned an invalid range response.")
             if match.group(3) != "*":
                 expected_total = int(match.group(3))
                 if int(match.group(2)) >= expected_total:
                     temp.unlink(missing_ok=True)
-                    if meta_path:
-                        meta_path.unlink(missing_ok=True)
                     raise DownloadError("The server returned an invalid range response.")
             if response.headers.get("Content-Encoding", "").lower() not in ("", "identity"):
                 temp.unlink(missing_ok=True)
-                if meta_path:
-                    meta_path.unlink(missing_ok=True)
                 raise DownloadError("The server encoded a ranged response; retry without resuming.")
         size = 0
         saved_before = offset if append else 0
@@ -1471,8 +1429,6 @@ class Jiosaavn:
         if not size:
             if not offset:
                 temp.unlink(missing_ok=True)
-                if meta_path:
-                    meta_path.unlink(missing_ok=True)
             raise DownloadError("The server returned an empty file.")
         expected = response.headers.get("Content-Length")
         if expected and expected.isdigit() and not response.headers.get("Content-Encoding"):
@@ -1480,17 +1436,6 @@ class Jiosaavn:
                 raise DownloadError("Download was incomplete. Please retry.")
         if expected_total is not None and temp.stat().st_size != expected_total:
             raise DownloadError("Download was incomplete. Please retry.")
-
-        # Store ETag/Content-MD5 for future resume validation
-        if meta_path and not append:  # Only on fresh start (200 OK), not on resume
-            etag = response.headers.get("ETag", "").strip('"')
-            md5 = response.headers.get("Content-MD5", "")
-            if etag or md5:
-                import json
-                try:
-                    meta_path.write_text(json.dumps({"etag": etag, "md5": md5}), encoding="utf-8")
-                except OSError:
-                    pass  # Non-fatal
 
         return temp
 
