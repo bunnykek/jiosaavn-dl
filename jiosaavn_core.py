@@ -485,7 +485,7 @@ class Jiosaavn:
                  genre=None, template=None, max_speed=None, proxy=None,
                  incremental=False, fallback_qualities=None, save_lyrics_file=False,
                  save_cover_file=False, post_hook=None, no_explicit=False,
-                 after_year=None, before_year=None):
+                 after_year=None, before_year=None, progress_style="single"):
         self.output = Path(output).expanduser()
         self.genre = normalize_genre(genre)
         self.workers = max(1, min(int(workers), MAX_WORKERS))
@@ -508,6 +508,7 @@ class Jiosaavn:
         self.no_explicit = no_explicit
         self.after_year = after_year
         self.before_year = before_year
+        self.progress_style = progress_style
         self.progress_enabled = False
         self._progress_lock = threading.Lock()
         self._progress_total = 0
@@ -597,7 +598,14 @@ class Jiosaavn:
                 self._progress_active = False
 
     def _write_progress(self):
-        """Redraw the bar line. The caller must hold self._progress_lock."""
+        """Redraw the progress display. The caller must hold self._progress_lock."""
+        if self.progress_style == "detailed":
+            self._write_detailed_progress()
+        else:
+            self._write_single_progress()
+
+    def _write_single_progress(self):
+        """Redraw the single-line progress bar. The caller must hold self._progress_lock."""
         width = 8
         total = max(self._progress_total, 1)
         filled = int(width * self._progress_done / total)
@@ -633,6 +641,69 @@ class Jiosaavn:
                 for pos, title in sorted(self._active_titles.items()))
         columns = shutil.get_terminal_size((80, 24)).columns
         sys.stderr.write("\r\033[K" + fit_width(line, columns - 1))
+        sys.stderr.flush()
+
+    def _write_detailed_progress(self):
+        """Redraw the detailed multi-line progress display. The caller must hold self._progress_lock."""
+        elapsed = max(0, int(time.monotonic() - self._collection_started_at))
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        # Header line
+        progress_text = bold(f"{self._progress_done}/{self._progress_total}") if Colors.enabled() else f"{self._progress_done}/{self._progress_total}"
+        speed_text = cyan(self._progress_speed) if Colors.enabled() else self._progress_speed
+        elapsed_text = blue(f"{hours}:{minutes:02d}:{seconds:02d}") if Colors.enabled() else f"{hours}:{minutes:02d}:{seconds:02d}"
+        
+        header = (f"Downloading {progress_text}  {speed_text}  Elapsed {elapsed_text}")
+        remaining = self._progress_total - self._progress_done
+        if self._progress_done >= 2 and remaining > 0:
+            eta = int(elapsed * remaining / self._progress_done)
+            eta_hours, eta_remainder = divmod(eta, 3600)
+            eta_minutes, eta_seconds = divmod(eta_remainder, 60)
+            if eta_hours:
+                eta_text = f"{eta_hours}h{eta_minutes}m"
+            elif eta_minutes:
+                eta_text = f"{eta_minutes}m{eta_seconds}s"
+            else:
+                eta_text = f"{eta_seconds}s"
+            eta_text = yellow(eta_text) if Colors.enabled() else eta_text
+            header += f"  ETA {eta_text}"
+        
+        lines = [header]
+        
+        # Individual track progress bars
+        if self._active_titles:
+            for pos in sorted(self._active_titles.keys()):
+                title = self._active_titles[pos]
+                amount = self._active_amount.get(pos, "")
+                # Create a mini progress bar for each track
+                bar_width = 20
+                if amount.endswith("%"):
+                    try:
+                        pct = int(amount.rstrip("%"))
+                        filled = int(bar_width * pct / 100)
+                    except ValueError:
+                        filled = 0
+                else:
+                    filled = 0
+                bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
+                bar_empty = gray("-" * (bar_width - filled)) if Colors.enabled() else "-" * (bar_width - filled)
+                track_bar = bar_filled + bar_empty
+                track_line = f"  {pos:02d} [{track_bar}] {amount} {title}"
+                lines.append(track_line)
+        
+        # Overall progress bar at bottom
+        width = 30
+        total = max(self._progress_total, 1)
+        filled = int(width * self._progress_done / total)
+        bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
+        bar_empty = gray("-" * (width - filled)) if Colors.enabled() else "-" * (width - filled)
+        overall_bar = bar_filled + bar_empty
+        lines.append(f"Overall [{overall_bar}] {progress_text}")
+        
+        # Clear screen and redraw
+        output = "\r\033[K" + "\n".join(lines)
+        sys.stderr.write(output)
         sys.stderr.flush()
 
     def _finish_progress(self):
