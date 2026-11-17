@@ -426,52 +426,95 @@ def save_failed_urls(path, failures):
     return len(urls)
 
 
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
 def display_width(text):
     """Approximate number of terminal columns `text` occupies.
 
-    Wide (CJK) characters count as 2; combining marks and control characters
-    count as 0. Emoji ZWJ sequences (e.g. 👨‍👩‍👧‍👦, 👩‍❤️‍👩) count as 2 columns total.
-    When unsure it errs on the wide side, so a line that is cut to fit never
-    wraps and breaks the progress redraw.
+    ANSI CSI escape sequences are ignored. Wide and ambiguous-width characters
+    count as 2 so truncation errs on the side of not wrapping on narrow
+    terminals (Termux/mobile). Emoji ZWJ sequences count as 2 columns total.
+    Combining marks and control characters count as 0.
     """
     width = 0
     in_zwj_sequence = False
-    for char in text:
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "\x1b":
+            match = _ANSI_CSI_RE.match(text, i)
+            if match:
+                i = match.end()
+                continue
         cat = unicodedata.category(char)
         if cat in ("Mn", "Me", "Cc"):
+            i += 1
             continue
         if cat == "Cf":  # Format characters (includes ZWJ U+200D)
-            # ZWJ continues an emoji sequence; don't add width
             in_zwj_sequence = True
+            i += 1
             continue
-        # Check if this is an emoji (Symbol, Other category)
         is_emoji = cat == "So"
         if is_emoji and in_zwj_sequence:
-            # Part of ZWJ sequence; already counted the first emoji
             in_zwj_sequence = False
+            i += 1
             continue
-        char_width = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        char_width = 2 if unicodedata.east_asian_width(char) in ("W", "F", "A") else 1
         width += char_width
-        if is_emoji:
-            in_zwj_sequence = True  # Next ZWJ+emoji will be skipped
-        else:
-            in_zwj_sequence = False
+        in_zwj_sequence = is_emoji
+        i += 1
     return width
 
 
 def fit_width(text, width):
-    """Cut `text` with an ellipsis so it takes at most `width` columns."""
+    """Cut `text` with an ellipsis so it takes at most `width` columns.
+
+    ANSI CSI escape sequences are preserved and never split. A reset sequence
+    is appended when truncation occurs inside active styling so styling does
+    not leak into following output.
+    """
     width = max(width, 1)
     if display_width(text) <= width:
         return text
-    kept, used = [], 0
-    for char in text:
-        char_width = display_width(char)
-        if used + char_width > width - 1:
+    target = max(width - 1, 0)
+    kept = []
+    used = 0
+    truncated = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "\x1b":
+            match = _ANSI_CSI_RE.match(text, i)
+            if match:
+                seq = match.group(0)
+                if used >= target and target >= 0:
+                    truncated = True
+                    break
+                kept.append(seq)
+                i = match.end()
+                continue
+        cat = unicodedata.category(char)
+        if cat in ("Mn", "Me", "Cc"):
+            kept.append(char)
+            i += 1
+            continue
+        if cat == "Cf":
+            kept.append(char)
+            i += 1
+            continue
+        is_emoji = cat == "So"
+        char_width = 2 if unicodedata.east_asian_width(char) in ("W", "F", "A") else 1
+        if used + char_width > target:
+            truncated = True
             break
         kept.append(char)
         used += char_width
-    return "".join(kept) + "…"
+        i += 1
+    result = "".join(kept)
+    if truncated:
+        result += "\033[0m…" if "\033[" in result else "…"
+    return result
 
 
 def is_true(value):
@@ -652,12 +695,15 @@ class Jiosaavn:
         elapsed = max(0, int(time.monotonic() - self._collection_started_at))
         hours, remainder = divmod(elapsed, 3600)
         minutes, seconds = divmod(remainder, 60)
-        
+
+        columns = shutil.get_terminal_size((80, 24)).columns
+        max_line = max(columns - 1, 20)
+
         # Header line
         progress_text = bold(f"{self._progress_done}/{self._progress_total}") if Colors.enabled() else f"{self._progress_done}/{self._progress_total}"
         speed_text = cyan(self._progress_speed) if Colors.enabled() else self._progress_speed
         elapsed_text = blue(f"{hours}:{minutes:02d}:{seconds:02d}") if Colors.enabled() else f"{hours}:{minutes:02d}:{seconds:02d}"
-        
+
         header = (f"Downloading {progress_text}  {speed_text}  Elapsed {elapsed_text}")
         remaining = self._progress_total - self._progress_done
         if self._progress_done >= 2 and remaining > 0:
@@ -672,15 +718,14 @@ class Jiosaavn:
                 eta_text = f"{eta_seconds}s"
             eta_text = yellow(eta_text) if Colors.enabled() else eta_text
             header += f"  ETA {eta_text}"
-        
+
         lines = [header]
-        
+
         # Individual track progress bars
         if self._active_titles:
             for pos in sorted(self._active_titles.keys()):
                 title = self._active_titles[pos]
                 amount = self._active_amount.get(pos, "")
-                # Create a mini progress bar for each track
                 bar_width = 20
                 if amount.endswith("%"):
                     try:
@@ -693,9 +738,9 @@ class Jiosaavn:
                 bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
                 bar_empty = gray("-" * (bar_width - filled)) if Colors.enabled() else "-" * (bar_width - filled)
                 track_bar = bar_filled + bar_empty
-                track_line = f"  {pos:02d} [{track_bar}] {amount} {title}"
+                track_line = f"  {pos:02d} [{track_bar}] {amount} {title}".rstrip()
                 lines.append(track_line)
-        
+
         # Overall progress bar at bottom
         width = 30
         total = max(self._progress_total, 1)
@@ -704,8 +749,8 @@ class Jiosaavn:
         bar_empty = gray("-" * (width - filled)) if Colors.enabled() else "-" * (width - filled)
         overall_bar = bar_filled + bar_empty
         lines.append(f"Overall [{overall_bar}] {progress_text}")
-        
-        # Clear screen and redraw
+
+        lines = [fit_width(line, max_line) for line in lines]
         output = "\r\033[K" + "\n".join(lines)
         sys.stderr.write(output)
         sys.stderr.flush()
@@ -715,26 +760,14 @@ class Jiosaavn:
         elapsed = max(0, int(time.monotonic() - self._collection_started_at))
         hours, remainder = divmod(elapsed, 3600)
         minutes, seconds = divmod(remainder, 60)
-        
+
+        columns = shutil.get_terminal_size((80, 24)).columns
+        max_line = max(columns - 1, 20)
         active_count = len(self._active_titles)
-        
-        # Global progress info
-        progress_text = bold(f"{self._progress_done}/{self._progress_total}") if Colors.enabled() else f"{self._progress_done}/{self._progress_total}"
-        active_text = cyan(f" ({active_count} active)") if Colors.enabled() and active_count else ""
-        
-        speed_text = cyan(self._progress_speed) if Colors.enabled() else self._progress_speed
-        elapsed_text = blue(f"{hours}:{minutes:02d}:{seconds:02d}") if Colors.enabled() else f"{hours}:{minutes:02d}:{seconds:02d}"
-        
-        # Global progress bar (20 chars)
-        bar_width = 20
-        total = max(self._progress_total, 1)
-        filled = int(bar_width * self._progress_done / total)
-        bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
-        bar_empty = gray("-" * (bar_width - filled)) if Colors.enabled() else "-" * (bar_width - filled)
-        overall_bar = bar_filled + bar_empty
-        
+
         # ETA
         remaining = self._progress_total - self._progress_done
+        eta_text = ""
         if self._progress_done >= 2 and remaining > 0:
             eta = int(elapsed * remaining / self._progress_done)
             eta_hours, eta_remainder = divmod(eta, 3600)
@@ -745,63 +778,55 @@ class Jiosaavn:
                 eta_text = f"{eta_minutes}m{eta_seconds}s"
             else:
                 eta_text = f"{eta_seconds}s"
-            eta_str = yellow(f"ETA {eta_text}") if Colors.enabled() else f"ETA {eta_text}"
-        else:
-            eta_str = ""
-        
-        # Build header line
+
+        progress_text = bold(f"{self._progress_done}/{self._progress_total}") if Colors.enabled() else f"{self._progress_done}/{self._progress_total}"
+        speed_text = cyan(self._progress_speed) if Colors.enabled() else self._progress_speed
+        elapsed_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+        elapsed_text = blue(elapsed_str) if Colors.enabled() else elapsed_str
+        bar_width = 20
+        total = max(self._progress_total, 1)
+        filled = int(bar_width * self._progress_done / total)
+        bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
+        bar_empty = gray("-" * (bar_width - filled)) if Colors.enabled() else "-" * (bar_width - filled)
+
         parts = [
-            f"Downloading {bold(f'{self._progress_done}/{self._progress_total}') if Colors.enabled() else f'{self._progress_done}/{self._progress_total}'}",
-            f"[{green('#' * int(20 * self._progress_done / max(self._progress_total, 1))) if Colors.enabled() else '#' * int(20 * self._progress_done / max(self._progress_total, 1))}{'-' * (20 - int(20 * self._progress_done / max(self._progress_total, 1)))}]",
-            cyan(self._progress_speed) if Colors.enabled() else self._progress_speed,
-            f"Elapsed {blue(f'{hours}:{minutes:02d}:{seconds:02d}') if Colors.enabled() else f'{hours}:{minutes:02d}:{seconds:02d}'}",
+            f"Downloading {progress_text}",
+            f"[{bar_filled}{bar_empty}]",
+            speed_text,
+            f"Elapsed {elapsed_text}",
         ]
         if active_count:
-            parts.append(cyan(f"({active_count} active)"))
-        if eta_str:
-            parts.append(yellow(f"ETA {eta_text}"))
-        
+            parts.append(cyan(f"({active_count} active)") if Colors.enabled() else f"({active_count} active)")
+        if eta_text:
+            parts.append(yellow(f"ETA {eta_text}") if Colors.enabled() else f"ETA {eta_text}")
         header = "  ".join(parts)
-        
-        # Active downloads with progress bars (max 4)
+
         active_lines = []
         for pos in sorted(self._active_titles.keys())[:4]:
             title = self._active_titles[pos]
             amount = self._active_amount.get(pos, "")
-            if len(title) > 45:
-                title = title[:42] + "..."
-            
-            # Create progress bar for this track
-            bar_width = 12
+            tbar_width = 12
             if amount.endswith("%"):
                 try:
                     pct = int(amount.rstrip("%"))
-                    filled = int(bar_width * pct / 100)
+                    filled_t = int(tbar_width * pct / 100)
                 except ValueError:
-                    filled = 0
+                    filled_t = 0
             else:
-                filled = 0
-            
-            bar_filled = green("#" * filled) if Colors.enabled() else "#" * filled
-            bar_empty = gray("-" * (bar_width - filled)) if Colors.enabled() else "-" * (bar_width - filled)
-            track_bar = bar_filled + bar_empty
-            
-            track_line = f"  {pos:02d} [{track_bar}] {amount} {title}"
+                filled_t = 0
+            tbar_filled = green("#" * filled_t) if Colors.enabled() else "#" * filled_t
+            tbar_empty = gray("-" * (tbar_width - filled_t)) if Colors.enabled() else "-" * (tbar_width - filled_t)
+            track_line = f"  {pos:02d} [{tbar_filled}{tbar_empty}] {amount} {title}".rstrip()
             active_lines.append(track_line)
-        
-        # Pad with empty lines if fewer than 4 active
+
         while len(active_lines) < 4:
             active_lines.append("")
-        
-        # Build all lines
-        lines = [header] + active_lines
-        
-        # Calculate number of lines to move cursor up
-        num_lines = 1 + 4  # header + 4 track lines
-        
-        # Use ANSI escape to move cursor up and redraw
-        # \r - carriage return, \033[K - clear line, \033[NA - move cursor up N lines
-        output = "\r\033[K" + "\n".join([header] + active_lines) + "\033[" + str(4) + "A"
+
+        lines = [fit_width(header, max_line)] + [fit_width(line, max_line) for line in active_lines]
+        # Truncate each line to the terminal width so it never wraps. Wrapped
+        # lines break the fixed cursor-up redraw and cause repeated/corrupted
+        # output on narrow terminals (e.g. Termux).
+        output = "\r\033[K" + "\n".join(lines) + "\033[4A"
         sys.stderr.write(output)
         sys.stderr.flush()
 
@@ -891,17 +916,13 @@ class Jiosaavn:
         else:
             eta_str = ""
         
-        # Build the pulse-style line
-        bar_colored = green("━" * filled + ("╸" if filled < 40 else "") + " " * max(0, 40 - filled - 1)) if Colors.enabled() else ("━" * filled + ("╸" if filled < 40 else "") + " " * max(0, 40 - filled - 1))
-        
-        line = (
-            f" {bold('Downloading') if Colors.enabled() else 'Downloading'}"
-            f"  {bold(f'{pct}%') if Colors.enabled() else f'{pct}%'}"
-            f"  {green('━' * filled + ('╸' if filled < 40 else '') + ' ' * max(0, 40 - filled - 1)) if Colors.enabled() else ('━' * filled + ('╸' if filled < 40 else '') + ' ' * max(0, 40 - filled - 1))}"
-            f"{eta_str}"
-        )
-        
-        sys.stderr.write("\r\033[K" + line)
+        bar = "━" * filled + ("╸" if filled < 40 else "") + " " * max(0, 40 - filled - 1)
+        bar_colored = green(bar) if Colors.enabled() else bar
+        pct_str = bold(f"{pct}%") if Colors.enabled() else f"{pct}%"
+        status_text = bold("Downloading") if Colors.enabled() else "Downloading"
+        line = f" {status_text}  {pct_str}  {bar_colored}{eta_str}"
+        columns = shutil.get_terminal_size((80, 24)).columns
+        sys.stderr.write("\r\033[K" + fit_width(line, max(columns - 1, 20)))
         sys.stderr.flush()
 
     def _finish_progress(self):
