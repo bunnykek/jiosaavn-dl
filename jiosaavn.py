@@ -289,7 +289,8 @@ def build_parser():
         parser.add_argument("--export-playlist", metavar="FORMAT", choices=("m3u", "m3u8", "pls"),
                             help="export playlist to M3U/M3U8/PLS file after download (only for playlists)")
         parser.add_argument("--save-lyrics-file", action="store_true",
-                            help="save lyrics as separate .lrc file alongside the audio file")
+                            help="save lyrics alongside the audio as a .lrc file "
+                                 "(synchronized/LRC when available, otherwise plain text)")
         parser.add_argument("--save-cover-file", action="store_true",
                             help="save cover art as folder.jpg in the album/playlist folder")
         parser.add_argument("--parallel-urls", type=int, default=1, metavar="N",

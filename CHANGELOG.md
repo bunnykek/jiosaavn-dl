@@ -20,6 +20,13 @@ Versions follow [semantic versioning](https://semver.org/). Releases are tagged
   is the collection position and accepts an integer format such as
   `{track:02d}`. Unknown or unavailable placeholders fail loudly instead of
   passing through. The default layout is unchanged.
+- Richer, consistent tagging: all genres/categories from JioSaavn are mapped
+  when available (joined with `; `) unless `--genre` overrides them; composer
+  and lyricist credits, record label, language, performers, ISRC, disc/track
+  numbers, and normalized release dates are written consistently.
+- `--save-lyrics-file` exports lyrics alongside each track as a `.lrc` file
+  (synchronized/LRC when the service provides timing, otherwise plain text);
+  embedded lyrics use the plain text.
 - The interactive progress bar shows the aggregate download speed across all
   active tracks (in MB/s or GB/s), the elapsed collection time as `H:MM:SS`,
   and an estimated time remaining (`ETA`) once enough tracks have finished to

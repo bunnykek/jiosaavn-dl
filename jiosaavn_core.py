@@ -286,35 +286,213 @@ def normalize_genre(value):
     return " ".join(str(value).split()) or None
 
 
-def track_genre(song):
-    """Return the best-effort genre string from JioSaavn track metadata.
+def _genre_values(value):
+    """Yield normalized genre/category strings from a value (str/list/nested)."""
+    if value is None:
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _genre_values(item)
+        return
+    if isinstance(value, dict):
+        for key in ("text", "title", "name", "genre", "music", "value"):
+            if key in value:
+                yield from _genre_values(value[key])
+        return
+    text = clean_text(value)
+    if not text:
+        return
+    for part in re.split(r"[;,/|]", text):
+        part = normalize_genre(part)
+        if part:
+            yield part
 
-    Prefers explicit genre fields; falls back to other music-category fields
-    exposed by the API when present. Returns None when nothing usable is found.
-    """
+
+def track_genres(song):
+    """Return a de-duplicated list of genres/categories from JioSaavn metadata."""
     if not isinstance(song, dict):
-        return None
-    for key in ("genre", "music", "music_genre", "primary_genre"):
-        value = normalize_genre(song.get(key))
-        if value:
-            return value
+        return []
+    out = []
+    seen = set()
+
+    def add(value):
+        for genre in _genre_values(value):
+            key = genre.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(genre)
+
+    for key in ("genre", "genres", "music", "music_genre", "primary_genre", "language"):
+        add(song.get(key))
     more = song.get("more_info")
     if isinstance(more, dict):
-        for key in ("genre", "music", "music_genre"):
-            value = normalize_genre(more.get(key))
-            if value:
-                return value
-        genres = more.get("genres")
-        if isinstance(genres, list):
-            for item in genres:
-                value = normalize_genre(item)
-                if value:
-                    return value
-        elif isinstance(genres, str):
-            value = normalize_genre(genres)
-            if value:
-                return value
-    return None
+        for key in ("genre", "genres", "music", "music_genre", "language"):
+            add(more.get(key))
+    return out
+
+
+def track_genre(song):
+    """Return the primary (first) genre string from JioSaavn track metadata."""
+    genres = track_genres(song)
+    return genres[0] if genres else None
+
+
+_DATE_RE = re.compile(r"^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$")
+
+
+def normalize_date(value):
+    """Normalize a date-like value to YYYY, YYYY-MM, or YYYY-MM-DD when possible."""
+    if value is None:
+        return None
+    text = clean_text(value).strip()
+    if not text:
+        return None
+    if text.isdigit() and len(text) == 4:
+        return text
+    match = _DATE_RE.match(text.replace("/", "-"))
+    if match:
+        year, month, day = match.groups()
+        if month and day:
+            try:
+                month_i, day_i = int(month), int(day)
+            except ValueError:
+                return text
+            if 1 <= month_i <= 12 and 1 <= day_i <= 31:
+                return f"{year}-{month_i:02d}-{day_i:02d}"
+        if month:
+            try:
+                month_i = int(month)
+            except ValueError:
+                return text
+            if 1 <= month_i <= 12:
+                return f"{year}-{month_i:02d}"
+        return year
+    return text
+
+
+def _metadata_values(value):
+    """Yield normalized non-empty strings from a str/list/dict metadata value."""
+    if value is None:
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _metadata_values(item)
+        return
+    if isinstance(value, dict):
+        for key in ("text", "title", "name", "value"):
+            if key in value:
+                yield from _metadata_values(value[key])
+        return
+    text = " ".join(clean_text(value).split())
+    if text:
+        yield text
+
+
+def metadata_list(song, *keys):
+    """Collect de-duplicated string values for the given metadata keys."""
+    if not isinstance(song, dict):
+        return []
+    out = []
+    seen = set()
+    sources = [song]
+    more = song.get("more_info")
+    if isinstance(more, dict):
+        sources.append(more)
+    for source in sources:
+        for key in keys:
+            for value in _metadata_values(source.get(key)):
+                k = value.casefold()
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(value)
+    return out
+
+
+def format_lrc_timestamp(seconds):
+    """Format seconds as an LRC timestamp [mm:ss.xx]."""
+    try:
+        total = max(float(seconds), 0.0)
+    except (TypeError, ValueError):
+        return None
+    minutes = int(total // 60)
+    secs = total - minutes * 60
+    centi = int(round((secs - int(secs)) * 100))
+    whole = int(secs)
+    if centi >= 100:
+        whole += 1
+        centi -= 100
+        if whole >= 60:
+            minutes += 1
+            whole -= 60
+    return f"[{minutes:02d}:{whole:02d}.{centi:02d}]"
+
+
+def _lyrics_to_lrc(payload):
+    """Convert a lyrics payload (plain or synced) to (lrc_text, plain_text)."""
+    if payload is None:
+        return None, None
+    if isinstance(payload, str):
+        text = clean_text(payload).strip()
+        if not text:
+            return None, None
+        plain = clean_text(re.sub(r"<br\s*/?>", "\n", payload)).strip()
+        return None, (plain or None)
+
+    plain = None
+    synced = None
+    if isinstance(payload, dict):
+        for key in ("lyrics", "plain_lyrics", "text"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                plain = clean_text(re.sub(r"<br\s*/?>", "\n", val)).strip() or plain
+        for key in ("synced_lyrics", "lrc", "syncedLyrics", "subtitle"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip() and "[" in val and "]" in val:
+                synced = clean_text(val).strip()
+                break
+        if synced is None:
+            for key in ("lyrics", "lines", "data", "synced_lyrics"):
+                val = payload.get(key)
+                if isinstance(val, list):
+                    lines = []
+                    for item in val:
+                        if not isinstance(item, dict):
+                            continue
+                        ts = item.get("time", item.get("start", item.get("startTime", item.get("timestamp"))))
+                        if ts is None:
+                            continue
+                        try:
+                            tsf = float(ts)
+                        except (TypeError, ValueError):
+                            continue
+                        if tsf > 10000:
+                            tsf = tsf / 1000.0
+                        stamp = format_lrc_timestamp(tsf)
+                        if not stamp:
+                            continue
+                        line = item.get("line") or item.get("text") or item.get("lyrics") or ""
+                        line = clean_text(re.sub(r"<br\s*/?>", " ", str(line))).strip()
+                        lines.append(f"{stamp} {line}".rstrip())
+                    if lines:
+                        synced = "\n".join(lines)
+                        if plain is None:
+                            plain_lines = []
+                            for it in val:
+                                if not isinstance(it, dict):
+                                    continue
+                                line = it.get("line") or it.get("text") or it.get("lyrics") or ""
+                                plain_lines.append(clean_text(re.sub(r"<br\s*/?>", " ", str(line))).strip())
+                            plain = "\n".join(plain_lines).strip() or None
+                        break
+        if synced is None and plain is None:
+            for key in ("data", "result"):
+                if key in payload:
+                    lrc, txt = _lyrics_to_lrc(payload[key])
+                    if lrc or txt:
+                        return lrc, txt
+    return synced, plain
 
 
 def _truncate_utf8(value, max_bytes):
@@ -1514,42 +1692,80 @@ class Jiosaavn:
                 audio[atom] = value
         audio["aART"] = clean_text(album_artist or song.get("primary_artists"))
         audio["trkn"] = [(pos, total)]
-        genre_value = self.genre or track_genre(song)
+        genre_value = self.genre or track_genres(song)
+        if isinstance(genre_value, list):
+            genre_value = "; ".join(genre_value)
         if genre_value:
             audio["\xa9gen"] = genre_value
+
+        # Normalize date fields consistently
+        release = normalize_date(song.get("release_date")) or normalize_date(song.get("year"))
+        if release:
+            audio["\xa9day"] = release
+        elif "\xa9day" in audio:
+            normalized = normalize_date(audio.get("\xa9day"))
+            if normalized:
+                audio["\xa9day"] = normalized
+
         audio["rtng"] = [4 if is_true(song.get("explicit_content")) else 2]
         track_id = song.get("id") or song_id
         if track_id:
             audio["----:com.apple.iTunes:JioSaavn ID"] = clean_text(track_id).encode("utf-8")
-        for label, key in (("Record label", "label"), ("Language", "language"),
-                           ("Featured artists", "featured_artists"),
-                           ("Singers", "singers"), ("Starring", "starring")):
-            value = clean_text(song.get(key))
-            if value:
-                audio[f"----:com.apple.iTunes:{label}"] = value.encode("utf-8")
+
+        # Composer / lyricist / performers (mapped consistently)
+        composers = metadata_list(song, "music", "composer", "composers", "music_by")
+        if composers:
+            audio["\xa9wrt"] = ", ".join(composers)
+            audio["----:com.apple.iTunes:COMPOSER"] = ", ".join(composers).encode("utf-8")
+        lyricists = metadata_list(song, "lyricist", "lyricists", "lyrics_by")
+        if lyricists:
+            audio["----:com.apple.iTunes:LYRICIST"] = ", ".join(lyricists).encode("utf-8")
+        singers = metadata_list(song, "singers", "singer")
+        if singers:
+            audio["----:com.apple.iTunes:Singers"] = ", ".join(singers).encode("utf-8")
+        featured = metadata_list(song, "featured_artists")
+        if featured:
+            audio["----:com.apple.iTunes:Featured artists"] = ", ".join(featured).encode("utf-8")
+        starring = metadata_list(song, "starring")
+        if starring:
+            audio["----:com.apple.iTunes:Starring"] = ", ".join(starring).encode("utf-8")
+
+        for label, keys in (("Record label", ("label", "label_name", "record_label")),
+                            ("Language", ("language",))):
+            values = metadata_list(song, *keys)
+            if values:
+                audio[f"----:com.apple.iTunes:{label}"] = ", ".join(values).encode("utf-8")
 
         # Add ISRC if available
-        isrc = clean_text(song.get("isrc"))
+        isrc = clean_text(song.get("isrc")) or (metadata_list(song, "isrc")[:1] or [None])[0]
         if isrc:
-            audio["----:com.apple.iTunes:ISRC"] = isrc.encode("utf-8")
+            audio["----:com.apple.iTunes:ISRC"] = str(isrc).encode("utf-8")
 
         # Add disc number if available
         disc_number = song.get("disc_number") or song.get("disc")
-        if disc_number:
+        if disc_number is None and isinstance(song.get("more_info"), dict):
+            disc_number = song["more_info"].get("disc_number") or song["more_info"].get("disc")
+        if disc_number not in (None, "", 0, "0"):
             try:
                 disc_num = int(disc_number)
-                # MP4 uses disk number as a tuple (disc_number, total_discs)
-                total_discs = song.get("total_discs") or 1
+                total_discs = song.get("total_discs")
+                if total_discs is None and isinstance(song.get("more_info"), dict):
+                    total_discs = song["more_info"].get("total_discs")
+                if total_discs in (None, "", 0, "0"):
+                    total_discs = 1
                 try:
                     total_discs = int(total_discs)
                 except (ValueError, TypeError):
                     total_discs = 1
-                audio["disk"] = [(disc_num, total_discs)]
+                if disc_num > 0:
+                    audio["disk"] = [(disc_num, total_discs)]
             except (ValueError, TypeError):
                 pass
 
         # Add compilation flag if available
         compilation = song.get("compilation") or song.get("is_compilation")
+        if compilation is None and isinstance(song.get("more_info"), dict):
+            compilation = song["more_info"].get("compilation") or song["more_info"].get("is_compilation")
         if is_true(compilation):
             audio["cpil"] = [1]
 
@@ -1560,23 +1776,25 @@ class Jiosaavn:
                 lyrics_pending = lyrics_id in self._lyrics_cache
             try:
                 if lyrics_pending:
-                    lyrics_text = cached_lyrics
+                    lrc_text, lyrics_text = cached_lyrics if isinstance(cached_lyrics, tuple) else (None, cached_lyrics)
                 else:
                     lyrics = self.api("lyrics.getLyrics", lyrics_id=lyrics_id, api_version="4")
-                    lyrics_text = None
-                    if lyrics.get("lyrics"):
-                        lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", lyrics["lyrics"]))
+                    lrc_text, lyrics_text = _lyrics_to_lrc(lyrics)
+                    # Fallback: plain lyrics from common fields if helper found nothing
+                    if not lyrics_text and not lrc_text and lyrics.get("lyrics"):
+                        lyrics_text = clean_text(re.sub(r"<br\s*/?>", "\n", str(lyrics["lyrics"]))).strip() or None
                     with self._cache_lock:
-                        self._lyrics_cache[lyrics_id] = lyrics_text
-                if lyrics_text:
-                    audio["\xa9lyr"] = lyrics_text
-                    # Save lyrics as separate .lrc file if requested
-                    if self.save_lyrics_file:
-                        lrc_path = song_path.with_suffix(".lrc")
-                        try:
-                            lrc_path.write_text(lyrics_text, encoding="utf-8")
-                        except OSError as exc:
-                            self._warning(f"  Warning: Could not save lyrics file: {exc}")
+                        self._lyrics_cache[lyrics_id] = (lrc_text, lyrics_text)
+                embedded = lyrics_text or (lrc_text and re.sub(r"\[[^\]]+\]\s*", "", lrc_text).strip()) or None
+                if embedded:
+                    audio["\xa9lyr"] = embedded
+                # Save lyrics as separate .lrc file if requested
+                if self.save_lyrics_file and (lrc_text or lyrics_text):
+                    lrc_path = song_path.with_suffix(".lrc")
+                    try:
+                        lrc_path.write_text(lrc_text or lyrics_text, encoding="utf-8")
+                    except OSError as exc:
+                        self._warning(f"  Warning: Could not save lyrics file: {exc}")
             except Exception as exc:
                 # Catch all exceptions (API errors, malformed response, regex errors)
                 # so lyrics failure never prevents track download
