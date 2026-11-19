@@ -21,7 +21,7 @@ classifiers = [
 jiosaavn-dl = "jiosaavn:main"
 
 [tool.setuptools]
-py-modules = ["jiosaavn", "jiosaavn_core"]
+py-modules = ["jiosaavn", "jiosaavn_core", "progress_handler"]
 
 [tool.setuptools.dynamic]
 version = {attr = "jiosaavn_core.__version__"}
