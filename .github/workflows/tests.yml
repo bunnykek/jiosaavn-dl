@@ -10,6 +10,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -44,4 +45,4 @@ jobs:
       - name: Audit Python dependencies
         run: python -m pip_audit --strict -r requirements.txt
       - name: Run Bandit static analysis
-        run: python -m bandit -r jiosaavn.py jiosaavn_core.py
+        run: python -m bandit -r jiosaavn.py jiosaavn_core.py progress_handler.py
