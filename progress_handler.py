@@ -33,10 +33,11 @@ class DescriptionColumn(ProgressColumn):
     """Description column truncated to ~1/3 terminal width with ellipsis."""
     
     def render(self, task: Task) -> Text:
-        max_width = max(10, (self._get_terminal_width() or 80) // 3)
+        term_width = self._get_terminal_width() or 80
+        max_width = max(8, term_width // 4) if term_width < 80 else max(10, term_width // 3)
         desc = task.description or ""
         if len(desc) > max_width:
-            desc = desc[:max_width - 1] + "…"
+            desc = desc[:max(0, max_width - 3)] + "..." if max_width > 3 else desc[:max_width]
         return Text(desc, style="bold")
     
     def _get_terminal_width(self) -> int:
@@ -52,12 +53,20 @@ class StatusColumn(ProgressColumn):
     
     def render(self, task: Task) -> Text:
         message = task.fields.get("message", "")
-        if len(message) > 18:
-            message = message[:17] + "…"
+        term_width = self._get_terminal_width() or 80
+        max_width = 18 if term_width >= 80 else max(8, min(14, term_width // 6))
+        if len(message) > max_width:
+            message = message[:max(0, max_width - 3)] + "..." if max_width > 3 else message[:max_width]
         else:
-            message = message.ljust(18)
+            message = message.ljust(max_width)
         return Text(message, style="dim")
-
+    def _get_terminal_width(self) -> int:
+        try:
+            import shutil
+            return shutil.get_terminal_size().columns
+        except Exception:
+            return 80
+            
 
 class PercentageColumn(ProgressColumn):
     """Percentage column: [progress.percentage]{task.percentage:>3.0f}% (green)."""
@@ -142,12 +151,15 @@ class DownloadProgressHandler:
     
     def _create_progress(self) -> Progress:
         """Create the Progress instance with custom columns."""
+        term_width = getattr(self.console, "width", 80) or 80
+        columns = [DescriptionColumn()]
+        if term_width >= 50:
+            columns.append(StatusColumn())
+        columns.extend([PulseBarColumn(bar_width=None), PercentageColumn()])
+        if term_width >= 80:
+            columns.append(TimeRemainingColumn())
         return Progress(
-            DescriptionColumn(),
-            StatusColumn(),
-            PulseBarColumn(bar_width=None),
-            PercentageColumn(),
-            TimeRemainingColumn(),
+            *columns,
             console=self.console,
             transient=True,
             expand=True,
