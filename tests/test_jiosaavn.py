@@ -1,0 +1,1485 @@
+"""Offline regression tests. The fixture is 0.1 seconds of generated silence."""
+import contextlib
+from concurrent.futures import Future
+import io
+import os
+from pathlib import Path
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import Mock, call, patch
+
+import requests
+from mutagen.mp4 import MP4
+
+import jiosaavn_core as core
+import jiosaavn as app
+
+FIXTURE = Path(__file__).parent / 'fixtures' / 'silence.m4a'
+URL = 'https://www.jiosaavn.com/song/example/token'
+SONG = {
+    'song': 'A: Song &amp; More', 'album': 'An Album', 'year': '2024',
+    'primary_artists': 'Artist', 'encrypted_media_url': 'encrypted',
+    'id': '123', 'has_lyrics': 'false', 'explicit_content': '0', 'genre': 'Pop',
+}
+
+
+def response(content=b'', text='', headers=None):
+    result = Mock()
+    result.text = text
+    result.content = content
+    result.headers = headers or {}
+    result.iter_content.return_value = [content]
+    result.__enter__ = Mock(return_value=result)
+    result.__exit__ = Mock(return_value=False)
+    return result
+
+
+class UrlTests(unittest.TestCase):
+    def test_supported_links(self):
+        for path, expected in (
+            ('song/name/token', 'song'), ('album/name/token', 'album'),
+            ('featured/name/token', 'playlist'), ('s/playlist/user/name/token', 'playlist'),
+            ('playlist/name/token', 'playlist'), ('s/album/hindi/name/token', 'album'),
+            ('s/song/hindi/name/token', 'song'),
+            ('p/album/hindi/name/token', 'album'), ('p/song/hindi/name/token', 'song'),
+            ('p/playlist/user/name/token', 'playlist'),
+            ('s/featured/hindi/name/token', 'playlist'), ('p/featured/hindi/name/token', 'playlist'),
+            ('artist/name/token', 'artist'), ('s/artist/hindi/name/token', 'artist'),
+            ('p/artist/hindi/name/token', 'artist'),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(app.parse_url(f'https://www.jiosaavn.com/{path}/?source=share#x'),
+                                 (expected, 'token'))
+
+    def test_legacy_saavn_featured_link_with_underscore_token(self):
+        self.assertEqual(
+            app.parse_url('https://www.saavn.com/s/featured/hindi/apne-desi-gaane-carvaan-select/'
+                          'r7OrmfAcC4JTHgJw1pi47A__'),
+            ('playlist', 'r7OrmfAcC4JTHgJw1pi47A__'))
+
+    def test_mobile_legacy_and_schemeless_links(self):
+        for host in app.SITE_HOSTS:
+            for scheme in ('https://', 'http://', ''):
+                with self.subTest(host=host, scheme=scheme):
+                    self.assertEqual(app.parse_url(f'{scheme}{host}/song/name/token'), ('song', 'token'))
+
+    def test_html_escaped_shared_url(self):
+        self.assertEqual(app.parse_url(URL + '?x=1&amp;y=2'), ('song', 'token'))
+
+    def test_short_link_resolution(self):
+        client = Mock()
+        redirect = response(headers={'Location': URL})
+        redirect.status_code = 302
+        client.request.return_value = redirect
+        self.assertEqual(app.resolve_url('https://saavn.app.link/example', client), ('song', 'token'))
+        self.assertFalse(client.request.call_args.kwargs['allow_redirects'])
+
+    def test_short_link_rejects_external_destination(self):
+        client = Mock()
+        redirect = response(headers={'Location': 'https://evil.com/song/name/token'})
+        redirect.status_code = 302
+        client.request.return_value = redirect
+        with self.assertRaises(app.DownloadError):
+            app.resolve_url('https://saavn.app.link/example', client)
+        self.assertEqual(client.request.call_count, 1)
+
+    def test_short_link_loop_is_bounded(self):
+        client = Mock()
+        redirect = response(headers={'Location': '/loop'})
+        redirect.status_code = 302
+        client.request.return_value = redirect
+        with self.assertRaises(app.DownloadError):
+            app.resolve_url('https://saavn.app.link/example', client)
+        # Loop detected on 2nd iteration (first visit adds to set, second detects loop)
+        self.assertEqual(client.request.call_count, 2)
+
+    def test_short_link_without_web_redirect(self):
+        client = Mock()
+        result = response()
+        result.status_code = 200
+        client.request.return_value = result
+        with self.assertRaisesRegex(app.DownloadError, 'full website URL'):
+            app.resolve_url('https://saavn.app.link/example', client)
+
+    def test_invalid_links(self):
+        for url in ('https://evil.com/song/name/id', 'file:///song/name/id',
+                    'https://www.jiosaavn.com/song/name/%2Ftmp', 'not-a-url'):
+            with self.subTest(url=url), self.assertRaises(app.DownloadError):
+                app.parse_url(url)
+
+    def test_portable_names(self):
+        for name in ('../../escape', 'AC/DC', 'A:B?C', '.', '', 'CON', 'x' * 300,
+                     'क' * 100):
+            result = app.safe_name(name)
+            self.assertTrue(result)
+            self.assertNotIn('/', result)
+            self.assertNotIn('\\', result)
+            self.assertLessEqual(len(result.encode('utf-8')), 255)
+            self.assertNotIn(result, ('.', '..', 'CON'))
+        self.assertEqual(app.safe_name('title', max_bytes=0), 'Unknown')
+        self.assertEqual(app.safe_name('क' * 100, max_bytes=1), 'Unknown')
+        self.assertEqual(len(app.safe_name('क' * 100, max_bytes=3).encode('utf-8')), 3)
+
+
+class ClientTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.session = Mock()
+        self.client = app.Jiosaavn(self.temp.name, session=self.session, cover=False)
+        self.output = io.StringIO()
+        self.stack = contextlib.ExitStack()
+        self.stack.enter_context(contextlib.redirect_stdout(self.output))
+        self.stack.enter_context(contextlib.redirect_stderr(self.output))
+        self.addCleanup(self.stack.close)
+
+    def prepare_track(self):
+        self.client.metadata = Mock(return_value={'123': dict(SONG)})
+        self.client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+        self.session.get.return_value = response(FIXTURE.read_bytes())
+
+    def test_json_and_legacy_callback(self):
+        for text in ('{"title": "Album"}', 'callback({"title": "Album"});'):
+            self.session.get.return_value = response(text=text)
+            self.assertEqual(self.client.metadata('album', 'id')['title'], 'Album')
+        self.assertEqual(self.session.get.call_args.kwargs['timeout'], 30)
+
+    def test_invalid_api_responses(self):
+        for text in ('<html>Unavailable</html>', '{}', '[]', '{"error":"unavailable"}'):
+            self.session.get.return_value = response(text=text)
+            with self.subTest(text=text), self.assertRaises(app.DownloadError):
+                self.client.metadata('song', 'id')
+
+    def test_search_normalizes_supported_results_and_skips_unsupported_urls(self):
+        self.client.api = Mock(return_value={"results": [
+            {"type": "song", "perma_url": "/song/title/song-token", "song": "A &amp; B",
+             "primary_artists": "Artist"},
+            {"type": "artist", "url": "https://www.jiosaavn.com/artist/name/token"},
+            {"type": "album", "url": "https://evil.example/album/name/token"},
+        ]})
+        self.assertEqual(self.client.search("  A & B  "), [{
+            "kind": "song", "url": "https://www.jiosaavn.com/song/title/song-token",
+            "title": "A & B", "subtitle": "Artist",
+        }])
+        self.client.api.assert_called_once_with("search.getResults", q="A & B", p=1, n=10)
+
+    def test_search_rejects_blank_query_and_invalid_response(self):
+        with self.assertRaisesRegex(app.DownloadError, "cannot be blank"):
+            self.client.search("  ")
+        self.client.api = Mock(return_value={"results": {}})
+        with self.assertRaisesRegex(app.DownloadError, "unsupported search response"):
+            self.client.search("title")
+
+    def test_http_errors(self):
+        self.session.get.return_value.raise_for_status.side_effect = requests.HTTPError('403')
+        with self.assertRaises(app.DownloadError):
+            self.client.metadata('song', 'id')
+
+    def test_real_download_and_tags(self):
+        self.prepare_track()
+        self.client.processTrack('token')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.name, 'An Album - Artist [2024]')
+        tags = MP4(path)
+        self.assertEqual(tags['\xa9nam'], ['A: Song & More'])
+        self.assertEqual(tags['\xa9gen'], ['Pop'])
+        self.assertEqual(tags['trkn'], [(1, 1)])
+        self.assertEqual(tags['rtng'], [2])
+        self.assertEqual(tags['----:com.apple.iTunes:JioSaavn ID'], [b'123'])
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
+
+    def test_long_unicode_track_filename_fits_filesystem_limit(self):
+        title = 'क' * 100
+        folder = Path(self.temp.name)
+        self.client.metadata = Mock(return_value={'123': {**SONG, 'song': title}})
+        self.client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+        self.session.get.return_value = response(FIXTURE.read_bytes())
+        self.client.processTrack('token')
+        destination = next(folder.rglob('*.m4a'))
+        self.assertLessEqual(len(destination.name.encode('utf-8')), 255)
+        partial = self.client.partial_path(destination)
+        self.assertLessEqual(len(partial.name.encode('utf-8')), 255)
+        partial.write_bytes(b'partial')
+        self.assertTrue(partial.exists())
+
+    def downloaded_tags(self):
+        self.client.processTrack('token')
+        return MP4(next(Path(self.temp.name).rglob('*.m4a')))
+
+    def test_template_renders_folder_layout(self):
+        self.client.template = '{artist}/{album}/{track:02d} - {title}'
+        self.prepare_track()
+        self.client.processTrack('token')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.parent.parent.name, 'Artist')
+        self.assertEqual(path.parent.parent.name, 'An Album')
+        self.assertTrue(path.parent.name.startswith('01 -'))
+
+    def test_template_uses_genre_and_quality_placeholders(self):
+        self.client.template = '{genre}/{quality}/{playlist}'
+        self.client.genre = 'Bollywood'
+        self.prepare_track()
+        self.client.processTrack('token', isPlaylist='My Mix')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.relative_to(self.temp.name),
+                         Path('Bollywood/320/My Mix'))
+
+    def test_template_track_placeholder_is_zero_padded(self):
+        self.client.template = '{track}'
+        self.prepare_track()
+        self.client.processTrack('token', song_pos=12, total_tracks=20)
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.name, '12')
+
+    def test_template_unknown_placeholder_raises(self):
+        with self.assertRaisesRegex(app.DownloadError, 'Unknown template placeholder'):
+            app.render_template('{bogus}', {})
+
+    def test_template_missing_placeholder_raises(self):
+        with self.assertRaisesRegex(app.DownloadError, 'not available'):
+            app.render_template('{album}', {'album': None})
+
+    def test_template_format_only_applied_to_integers(self):
+        self.assertEqual(app.render_template('{track:02d}', {'track': 7}), '07')
+        # A string placeholder is returned as-is even with a format suffix.
+        self.assertEqual(app.render_template('{title:02d}', {'title': 'T'}), 'T')
+
+    def test_template_components_are_sanitized(self):
+        self.client.template = '{album}'
+        self.prepare_track()
+        self.client.processTrack('token')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        # `safe_name` keeps spaces and dashes; only path separators and other
+        # illegal characters are replaced, so a placeholder cannot escape the
+        # output directory or create nested folders.
+        self.assertEqual(path.parent.name, 'An Album')
+        self.assertTrue(str(path.parent).startswith(str(self.temp.name)))
+
+    def test_genre_is_written_to_the_genre_tag(self):
+        self.prepare_track()
+        self.client.genre = 'Bollywood'
+        self.assertEqual(self.downloaded_tags()['\xa9gen'], ['Bollywood'])
+
+    def test_genre_supports_non_latin_text(self):
+        self.prepare_track()
+        self.client.genre = 'हिंदी सोल'
+        self.assertEqual(self.downloaded_tags()['\xa9gen'], ['हिंदी सोल'])
+
+    def test_no_genre_tag_when_neither_source_has_one(self):
+        self.prepare_track()
+        song = {key: value for key, value in SONG.items() if key != 'genre'}
+        self.client.metadata = Mock(return_value={'123': song})
+        self.assertNotIn('\xa9gen', self.downloaded_tags())
+
+    def test_service_genre_is_used_unless_the_option_overrides_it(self):
+        self.prepare_track()
+        self.assertEqual(self.downloaded_tags()['\xa9gen'], ['Pop'])
+        self.client.overwrite = True
+        self.client.genre = 'Bollywood'
+        self.assertEqual(self.downloaded_tags()['\xa9gen'], ['Bollywood'])
+
+    def test_genre_whitespace_is_collapsed_and_blank_means_none(self):
+        self.assertEqual(app.Jiosaavn(self.temp.name, session=Mock(), genre='  Indian\n Pop ').genre,
+                         'Indian Pop')
+        for blank in (None, '', '   \n'):
+            self.assertIsNone(app.Jiosaavn(self.temp.name, session=Mock(), genre=blank).genre)
+
+    def test_skip_valid_file(self):
+        self.prepare_track()
+        self.client.processTrack('token')
+        self.client.processTrack('token')
+        self.assertEqual(self.client.skipped, 1)
+        self.assertEqual(self.session.get.call_count, 1)
+
+    def test_skip_tagged_track_after_position_changes(self):
+        self.prepare_track()
+        self.client.processTrack('token', song_pos=1)
+        self.client.processTrack('token', song_pos=2)
+        self.assertEqual(self.client.skipped, 1)
+        self.assertEqual(self.session.get.call_count, 1)
+
+    def test_dry_run_lists_track_without_media_requests_or_files(self):
+        self.prepare_track()
+        self.client.dry_run = True
+        self.client.processTrack('token')
+        self.assertEqual(self.client.planned, 1)
+        self.assertEqual(self.client.downloaded, 0)
+        self.client.getCdnURL.assert_not_called()
+        self.session.get.assert_not_called()
+        self.assertFalse(list(Path(self.temp.name).rglob('*')))
+        self.assertIn('Would download:', self.output.getvalue())
+
+    def test_quiet_dry_run_suppresses_routine_output(self):
+        self.prepare_track()
+        self.client.dry_run = True
+        self.client.quiet = True
+        self.client.processTrack('token')
+        self.assertEqual(self.output.getvalue(), '')
+
+    def test_verbose_dry_run_shows_song_id(self):
+        self.prepare_track()
+        self.client.dry_run = True
+        self.client.verbose = True
+        self.client.processTrack('token')
+        self.assertIn('JioSaavn ID: 123', self.output.getvalue())
+
+    def test_verbose_download_shows_song_id(self):
+        self.prepare_track()
+        self.client.verbose = True
+        self.client.processTrack('token')
+        self.assertIn('JioSaavn ID: 123', self.output.getvalue())
+
+    def test_collection_track_metadata_avoids_song_lookup(self):
+        self.prepare_track()
+        collection_song = dict(SONG, perma_url=URL)
+        self.client.metadata.return_value = {
+            'title': 'My Album',
+            'songs': [collection_song],
+        }
+        self.client.process_collection('album', 'collection-token')
+        self.assertEqual(self.client.metadata.call_count, 1)
+        self.assertEqual(self.client.downloaded, 1)
+
+    def test_many_artists_are_not_guessed_to_be_various_artists(self):
+        self.prepare_track()
+        song = dict(SONG, primary_artists='Artist One, Artist Two, Artist Three')
+        self.client.processTrack('token', song_data=song)
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(path.parent.name,
+                         'An Album - Artist One, Artist Two, Artist Three [2024]')
+
+    def tagged_folder(self, name, count):
+        """Create a folder of valid tracks tagged with song IDs id0, id1, ..."""
+        folder = Path(self.temp.name) / name
+        folder.mkdir()
+        for number in range(count):
+            path = folder / f'{number + 1:02d}. Song {number}.m4a'
+            path.write_bytes(FIXTURE.read_bytes())
+            tags = MP4(path)
+            tags['----:com.apple.iTunes:JioSaavn ID'] = [f'id{number}'.encode()]
+            tags.save()
+        return folder
+
+    def count_tag_reads(self):
+        reads = []
+        original = self.client._tagged_song_id
+
+        def counting(path):
+            reads.append(path)
+            return original(path)
+
+        self.client._tagged_song_id = counting
+        return reads
+
+    def test_folder_tags_are_read_once_per_run(self):
+        folder = self.tagged_folder('Album', 30)
+        reads = self.count_tag_reads()
+        for number in range(30, 40):
+            self.client._existing_destination(folder, folder / f'{number + 1:02d}. New.m4a', f'id{number}')
+        self.assertLessEqual(len(reads), 30)
+
+    def test_existing_song_is_found_by_id(self):
+        folder = self.tagged_folder('Album', 5)
+        found = self.client._existing_destination(folder, folder / '99. Renamed.m4a', 'id3')
+        self.assertEqual(found, (folder / '04. Song 3.m4a', True))
+        missing = self.client._existing_destination(folder, folder / '99. Renamed.m4a', 'other')
+        self.assertEqual(missing, (folder / '99. Renamed.m4a', False))
+
+    def test_different_song_at_same_path_gets_id_suffix(self):
+        folder = self.tagged_folder('Album', 2)
+        destination = folder / '01. Song 0.m4a'
+        chosen, found = self.client._existing_destination(folder, destination, 'newid')
+        self.assertFalse(found)
+        self.assertEqual(chosen.name, '01. Song 0 [newid].m4a')
+
+    def test_overwrite_finds_existing_song_by_id_after_position_changes(self):
+        self.prepare_track()
+        self.client.processTrack('token', song_pos=1)
+        original = next(Path(self.temp.name).rglob('*.m4a'))
+        overwrite_client = app.Jiosaavn(self.temp.name, session=self.session,
+                                        cover=False, overwrite=True)
+        overwrite_client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+        updated_song = {**SONG, 'song': 'Updated title'}
+        overwrite_client.processTrack('token', song_pos=2, song_data=updated_song)
+        files = list(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(files, [original])
+        self.assertEqual(MP4(original)['\xa9nam'], ['Updated title'])
+        self.assertEqual(overwrite_client.downloaded, 1)
+
+    def test_overwrite_claims_duplicate_song_only_once(self):
+        self.prepare_track()
+        self.client.overwrite = True
+        collection = {
+            'title': 'Duplicates',
+            'songs': [{'perma_url': URL + '1'}, {'perma_url': URL + '2'}],
+        }
+        self.client.metadata = Mock(side_effect=lambda kind, token, page=None: (
+            {'songs': [dict(SONG)]} if kind == 'song' else collection))
+        self.client.process_collection('playlist', 'list')
+        self.assertEqual((self.client.downloaded, self.client.skipped), (1, 1))
+
+    def test_dry_run_releases_song_claim_for_repeated_items(self):
+        self.prepare_track()
+        self.client.dry_run = True
+        self.client.processTrack('token')
+        self.client.processTrack('token')
+        self.assertEqual((self.client.planned, self.client.skipped), (2, 0))
+
+    def test_saved_track_is_added_to_folder_index(self):
+        self.prepare_track()
+        self.tagged_folder('An Album - Artist [2024]', 1)
+        self.client.processTrack('token')
+        reads = self.count_tag_reads()
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertEqual(self.client.skipped, 1)
+        # Only the matching file is re-read to confirm it, not the whole folder.
+        self.assertLessEqual(len(reads), 1)
+
+    def test_song_is_claimed_once_even_in_a_new_folder(self):
+        folder = Path(self.temp.name) / 'Album'  # does not exist yet
+        first = self.client._existing_destination(folder, folder / '01. Song.m4a', 'id1')
+        second = self.client._existing_destination(folder, folder / '02. Song.m4a', 'id1')
+        self.assertEqual(first, (folder / '01. Song.m4a', False))
+        self.assertTrue(second[1])
+
+    def test_failed_download_releases_its_claim(self):
+        self.prepare_track()
+        self.client.getCdnURL = Mock(side_effect=app.DownloadError('no audio'))
+        with self.assertRaises(app.DownloadError):
+            self.client.processTrack('token')
+        self.client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+        self.client.processTrack('token')
+        self.assertEqual((self.client.downloaded, self.client.skipped), (1, 0))
+
+    def test_same_song_twice_in_collection_downloads_once_every_time(self):
+        for attempt in range(10):
+            with self.subTest(attempt=attempt):
+                session = Mock()
+                session.get.return_value = response(FIXTURE.read_bytes())
+                client = app.Jiosaavn(Path(self.temp.name) / f'run{attempt}',
+                                      session=session, cover=False)
+                client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+                collection = {'title': 'Dupes', 'songs': [{'perma_url': URL + '1'},
+                                                          {'perma_url': URL + '2'}]}
+                client.metadata = Mock(side_effect=lambda kind, token, page=None: (
+                    {'songs': [dict(SONG)]} if kind == 'song' else collection))
+                client.process_collection('playlist', 'list')
+                self.assertEqual((client.downloaded, client.skipped, client.failed), (1, 1, 0))
+
+    def test_current_song_list_response(self):
+        self.prepare_track()
+        self.client.metadata.return_value = {'songs': [dict(SONG)], 'modules': {}}
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 1)
+
+    def test_direct_song_response(self):
+        self.prepare_track()
+        self.client.metadata.return_value = dict(SONG)
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 1)
+
+    def test_replace_invalid_existing_file(self):
+        self.prepare_track()
+        self.client.processTrack('token')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        path.write_bytes(b'error page')
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 2)
+        self.assertEqual(MP4(path)['\xa9nam'], ['A: Song & More'])
+
+    def test_tag_failure_preserves_old_file_and_cleans_temp(self):
+        self.prepare_track()
+        self.client.processTrack('token')
+        path = next(Path(self.temp.name).rglob('*.m4a'))
+        original = path.read_bytes()
+        self.client.overwrite = True
+        self.client.tagger = Mock(side_effect=ValueError('bad metadata'))
+        with self.assertRaises(ValueError):
+            self.client.processTrack('token')
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
+
+    def test_truncated_and_empty_downloads(self):
+        for content, headers in ((b'', {}), (b'error', {'Content-Type': 'text/html'})):
+            self.session.get.return_value = response(content, headers=headers)
+            with self.subTest(content=content), self.assertRaises(app.DownloadError):
+                self.client.download_file('https://example.com/audio', Path(self.temp.name) / 'track.m4a')
+            self.assertFalse(list(Path(self.temp.name).iterdir()))
+        path = Path(self.temp.name) / 'track.m4a'
+        self.session.get.return_value = response(b'a', headers={'Content-Length': '5'})
+        with self.assertRaises(app.DownloadError):
+            self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(self.client.partial_path(path).read_bytes(), b'a')
+
+    def test_interrupted_stream_preserves_partial_file(self):
+        self.session.get.return_value = response()
+
+        def interrupted():
+            yield b'partial'
+            raise requests.ConnectionError('lost connection')
+
+        self.session.get.return_value.iter_content.return_value = interrupted()
+        path = Path(self.temp.name) / 'track.m4a'
+        with self.assertRaises(app.DownloadError):
+            self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(self.client.partial_path(path).read_bytes(), b'partial')
+
+    def test_keyboard_interrupt_preserves_partial_file(self):
+        self.session.get.return_value = response()
+
+        def interrupted():
+            yield b'partial'
+            raise KeyboardInterrupt
+
+        self.session.get.return_value.iter_content.return_value = interrupted()
+        path = Path(self.temp.name) / 'track.m4a'
+        with self.assertRaises(KeyboardInterrupt):
+            self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(self.client.partial_path(path).read_bytes(), b'partial')
+
+    def test_resume_partial_download_with_range_request(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        self.client.partial_path(path).write_bytes(b'abc')
+        result = response(b'defghij', headers={
+            'Content-Length': '7',
+            'Content-Range': 'bytes 3-9/10',
+        })
+        result.status_code = 206
+        self.session.get.return_value = result
+        temp = self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(temp.read_bytes(), b'abcdefghij')
+        self.assertEqual(self.session.get.call_args.kwargs['headers'], {
+            'Range': 'bytes=3-', 'Accept-Encoding': 'identity',
+        })
+
+    def test_download_reports_progress_against_the_content_length(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        result = response(b'abcdefgh', headers={'Content-Length': '8'})
+        result.iter_content.return_value = [b'ab', b'cd', b'efgh']
+        self.session.get.return_value = result
+        seen = []
+        self.client.download_file('https://example.com/audio', path,
+                                  progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(2, 8), (4, 8), (8, 8)])
+
+    def test_resumed_download_progress_counts_the_bytes_already_saved(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        self.client.partial_path(path).write_bytes(b'abc')
+        result = response(b'defgh', headers={'Content-Length': '5', 'Content-Range': 'bytes 3-7/8'})
+        result.iter_content.return_value = [b'de', b'fgh']
+        result.status_code = 206
+        self.session.get.return_value = result
+        seen = []
+        self.client.download_file('https://example.com/audio', path,
+                                  progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(5, 8), (8, 8)])
+
+    def test_download_progress_without_a_known_size_has_no_total(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        result = response(b'abcd')
+        result.iter_content.return_value = [b'ab', b'cd']
+        self.session.get.return_value = result
+        seen = []
+        self.client.download_file('https://example.com/audio', path,
+                                  progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(2, None), (4, None)])
+
+    def test_invalid_range_response_discards_partial_file(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        partial = self.client.partial_path(path)
+        partial.write_bytes(b'abc')
+        result = response(b'data', headers={'Content-Range': 'bytes 0-3/7'})
+        result.status_code = 206
+        self.session.get.return_value = result
+        with self.assertRaises(app.DownloadError):
+            self.client.download_file('https://example.com/audio', path)
+        self.assertFalse(partial.exists())
+
+    def test_stale_complete_partial_restarts_after_range_is_rejected(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        partial = self.client.partial_path(path)
+        partial.write_bytes(b'complete old file')
+        rejected = response()
+        rejected.status_code = 416
+        result = response(b'fresh complete file', headers={'Content-Length': '19'})
+        self.session.get.side_effect = [rejected, result]
+        temp = self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(temp.read_bytes(), b'fresh complete file')
+        self.assertEqual(self.session.get.call_count, 2)
+        self.assertEqual(self.session.get.call_args_list[0].kwargs['headers']['Range'],
+                         'bytes=17-')
+        self.assertNotIn('headers', self.session.get.call_args_list[1].kwargs)
+
+    def test_repeated_range_rejection_reports_error_and_discards_partial(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        partial = self.client.partial_path(path)
+        partial.write_bytes(b'complete old file')
+        rejected = response()
+        rejected.status_code = 416
+        self.session.get.return_value = rejected
+        with self.assertRaisesRegex(app.DownloadError, 'rejected the download range twice'):
+            self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(self.session.get.call_count, 2)
+        self.assertFalse(partial.exists())
+
+    def test_resume_restarts_when_server_ignores_range(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        self.client.partial_path(path).write_bytes(b'old partial')
+        result = response(b'complete', headers={'Content-Length': '8'})
+        result.status_code = 200
+        self.session.get.return_value = result
+        temp = self.client.download_file('https://example.com/audio', path)
+        self.assertEqual(temp.read_bytes(), b'complete')
+
+    def test_partial_from_other_quality_is_not_resumed(self):
+        path = Path(self.temp.name) / 'track.m4a'
+        self.session.get.return_value = response()
+
+        def interrupted():
+            yield b'part-of-320'
+            raise requests.ConnectionError('lost connection')
+
+        self.session.get.return_value.iter_content.return_value = interrupted()
+        with self.assertRaises(app.DownloadError):
+            self.client.download_file('https://example.com/audio', path)  # default 320 kbps
+        other_session = Mock()
+        other = app.Jiosaavn(self.temp.name, quality='160', session=other_session, cover=False)
+        result = response(b'whole-160-file', headers={'Content-Length': '14'})
+        result.status_code = 200
+        other_session.get.return_value = result
+        temp = other.download_file('https://example.com/audio', path)
+        self.assertNotIn('headers', other_session.get.call_args.kwargs)
+        self.assertEqual(temp.read_bytes(), b'whole-160-file')
+
+    def test_finished_track_removes_partials_from_other_qualities(self):
+        self.prepare_track()
+        folder = Path(self.temp.name) / 'An Album - Artist [2024]'
+        folder.mkdir()
+        stale = folder / '01. A_ Song & More.m4a.160.part'
+        stale.write_bytes(b'old')
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertFalse(stale.exists())
+        self.assertFalse(list(Path(self.temp.name).rglob('*.part')))
+
+    def test_optional_lyrics_failure_keeps_track(self):
+        self.prepare_track()
+        self.client.metadata.return_value['123']['has_lyrics'] = True
+        self.client.api = Mock(side_effect=app.DownloadError('lyrics offline'))
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertIn('lyrics unavailable', self.output.getvalue())
+
+    def test_optional_artwork_failure_keeps_track(self):
+        self.prepare_track()
+        self.client.cover = True
+        self.client.metadata.return_value['123']['image'] = 'https://example.com/image-150x150.jpg'
+        self.session.get.side_effect = [requests.ConnectionError('cover offline'), response(FIXTURE.read_bytes())]
+        self.client.processTrack('token')
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertIn('cover unavailable', self.output.getvalue())
+        self.assertIn('500x500', self.session.get.call_args_list[0].args[0])
+
+    def test_collection_continues_after_unexpected_worker_exception(self):
+        self.client.metadata = Mock(return_value={
+            'title': 'Unexpected failure',
+            'songs': [{'perma_url': URL + '1'}, {'perma_url': URL + '2'}],
+        })
+        self.client.processTrack = Mock(side_effect=RuntimeError('unexpected bug'))
+        self.client.process_collection('playlist', 'token')
+        self.assertEqual(self.client.failed, 2)
+        self.assertTrue(all('unexpected bug' in failure.reason
+                            for failure in self.client.failures))
+
+    def test_collection_interrupt_cancels_pending_futures(self):
+        self.client.metadata = Mock(return_value={
+            'title': 'Interrupted',
+            'songs': [{'perma_url': URL + str(i)} for i in range(3)],
+        })
+        executor = Mock()
+        # Support context manager protocol - __exit__ should call shutdown with cancel_futures=True on exception
+        executor.__enter__ = Mock(return_value=executor)
+        def mock_exit(exc_type, exc_val, exc_tb):
+            executor.shutdown(wait=True, cancel_futures=exc_type is not None)
+            return False
+        executor.__exit__ = Mock(side_effect=mock_exit)
+        futures = [Future(), Future(), Future()]
+        executor.submit.side_effect = futures
+        with patch.object(core, 'ThreadPoolExecutor', return_value=executor):
+            with patch.object(core, 'as_completed', side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.client.process_collection('playlist', 'token')
+        executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        self.assertTrue(all(future.cancelled() for future in futures))
+
+    def test_collection_continues_after_failure(self):
+        self.client.metadata = Mock(return_value={
+            'listname': 'My Playlist', 'list_count': 3,
+            'songs': [{'perma_url': URL}, {}, {'perma_url': URL}],
+        })
+        self.client.processTrack = Mock()
+        self.client.process_collection('playlist', 'token')
+        self.assertEqual(self.client.processTrack.call_count, 2)
+        self.assertEqual(self.client.failed, 1)
+        positions = {call.args[2:4] for call in self.client.processTrack.call_args_list}
+        self.assertEqual(positions, {(1, 3), (3, 3)})
+
+    def test_collection_downloads_tracks_concurrently(self):
+        self.client.metadata = Mock(return_value={
+            'title': 'My Album',
+            'songs': [{'perma_url': URL} for _ in range(4)],
+        })
+        barrier = threading.Barrier(4, timeout=2)
+        worker_threads = set()
+        worker_sessions = []
+
+        def process_track(*args, **kwargs):
+            worker_threads.add(threading.current_thread().ident)
+            barrier.wait()
+            self.client._increment_counter('downloaded')
+
+        def create_worker_session():
+            worker_session = Mock()
+            worker_sessions.append(worker_session)
+            return worker_session
+
+        self.client._provided_session = False
+        self.client._new_session = Mock(side_effect=create_worker_session)
+        self.client.processTrack = Mock(side_effect=process_track)
+        self.client.process_collection('album', 'token')
+        self.assertEqual(len(worker_threads), 4)
+        self.assertEqual(self.client.downloaded, 4)
+        self.assertEqual(len(worker_sessions), 4)
+        self.assertTrue(all(session.close.called for session in worker_sessions))
+
+    def progress_collection(self, titles):
+        """Set up a playlist whose tracks have the given titles, with the bar on."""
+        songs = [{'perma_url': f'{URL}{number}'} for number in range(1, len(titles) + 1)]
+        by_token = {f'token{number}': title for number, title in enumerate(titles, 1)}
+        collection = {'title': 'Pair', 'songs': songs}
+        self.client.getCdnURL = Mock(return_value='https://aac.example/song.m4a')
+        self.session.get.return_value = response(FIXTURE.read_bytes())
+        self.client.metadata = Mock(side_effect=lambda kind, token, page=None: (
+            {'songs': [{**SONG, 'id': token, 'song': by_token[token]}]}
+            if kind == 'song' else collection))
+        self.client.progress_enabled = True
+
+    def test_progress_mode_prints_a_line_for_each_downloaded_track(self):
+        self.progress_collection(['First Song', 'Second Song'])
+        self.client.process_collection('playlist', 'list')
+        output = self.output.getvalue()
+        self.assertIn('Downloaded: First Song', output)
+        self.assertIn('Downloaded: Second Song', output)
+        self.assertIn('2/2', output)
+
+    def test_progress_mode_prints_skipped_tracks(self):
+        self.progress_collection(['First Song', 'Second Song'])
+        self.client.process_collection('playlist', 'list')
+        self.output.truncate(0)
+        self.output.seek(0)
+        self.client.process_collection('playlist', 'list')
+        output = self.output.getvalue()
+        self.assertIn('Skipped: First Song', output)
+        self.assertIn('Skipped: Second Song', output)
+        self.assertNotIn('Downloaded:', output)
+
+    def test_progress_mode_prints_failed_tracks_with_their_title(self):
+        self.progress_collection(['First Song'])
+        self.client.getCdnURL = Mock(side_effect=app.DownloadError('no audio'))
+        self.client.process_collection('playlist', 'list')
+        self.assertIn('Failed: First Song', self.output.getvalue())
+        self.assertIn('no audio', self.output.getvalue())
+        self.assertEqual(self.client.failed, 1)
+
+    def peak_concurrency(self, workers, tracks=8):
+        """Run a collection and return the most tracks that were in progress at once."""
+        state = {'active': 0, 'peak': 0}
+        lock = threading.Lock()
+
+        def work(*args, **kwargs):
+            with lock:
+                state['active'] += 1
+                state['peak'] = max(state['peak'], state['active'])
+            time.sleep(0.05)
+            with lock:
+                state['active'] -= 1
+
+        kwargs = {} if workers is None else {'workers': workers}
+        client = app.Jiosaavn(self.temp.name, session=Mock(), cover=False, **kwargs)
+        client.metadata = Mock(return_value={'title': 'Mix',
+                                             'songs': [{'perma_url': URL}] * tracks})
+        client.processTrack = Mock(side_effect=work)
+        client.process_collection('album', 'token')
+        return client, state['peak']
+
+    def test_workers_limits_how_many_tracks_download_at_once(self):
+        _, peak = self.peak_concurrency(1)
+        self.assertEqual(peak, 1)
+        _, peak = self.peak_concurrency(3)
+        self.assertGreaterEqual(peak, 2)  # really parallel
+        self.assertLessEqual(peak, 3)  # but never above the limit
+
+    def test_workers_default_matches_the_documented_value(self):
+        client, peak = self.peak_concurrency(None)
+        self.assertEqual(client.workers, core.COLLECTION_WORKERS)
+        self.assertLessEqual(peak, core.COLLECTION_WORKERS)
+
+    def test_workers_is_not_raised_above_the_track_count(self):
+        client, peak = self.peak_concurrency(16, tracks=2)
+        self.assertLessEqual(peak, 2)
+
+    def test_failed_collection_track_is_recorded_with_its_url(self):
+        self.progress_collection(['First Song', 'Second Song'])
+        self.client.progress_enabled = False  # recording must not depend on the bar
+        self.client.getCdnURL = Mock(side_effect=app.DownloadError('no audio'))
+        self.client.process_collection('playlist', 'list')
+        self.assertEqual(self.client.failed, 2)
+        self.assertEqual(len(self.client.failures), 2)
+        by_url = {failure.url: failure for failure in self.client.failures}
+        first = by_url[f'{URL}1']
+        self.assertEqual(first.label, 'First Song (track 1 of Pair)')
+        self.assertEqual(first.reason, 'no audio')
+        self.assertEqual(by_url[f'{URL}2'].label, 'Second Song (track 2 of Pair)')
+
+    def test_failure_before_the_title_is_known_still_has_a_label(self):
+        self.client.metadata = Mock(return_value={
+            'title': 'Mix', 'songs': [{'perma_url': 'https://example.com/not-a-song'}]})
+        self.client.process_collection('playlist', 'list')
+        self.assertEqual(self.client.failed, 1)
+        self.assertEqual(self.client.failures[0].label, 'Track 1 of Mix')
+        self.assertIsNone(self.client.failures[0].url)  # nothing to retry
+
+    def test_progress_line_shows_titles_being_downloaded(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.assertIn('02 Second Song', self.output.getvalue().split('\r')[-1])
+        self.client._track_finished(2, 3, 'Second Song', 'Artist', 'Downloaded')
+        self.assertNotIn('Second Song', self.output.getvalue().split('\r')[-1])
+
+    def last_bar(self):
+        return self.output.getvalue().split('\r')[-1].replace('\x1b[K', '')
+
+    def test_progress_line_shows_the_percent_of_each_track(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.client._track_progress(2, 45, 100)
+        self.assertIn('02 45% Second Song', self.last_bar())
+        self.client._track_progress(2, 100, 100)
+        self.assertIn('02 100% Second Song', self.last_bar())
+
+    def test_progress_line_shows_megabytes_when_the_size_is_unknown(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.client._track_progress(2, 3_300_000, None)
+        self.assertIn('02 3.1MB Second Song', self.last_bar())
+
+    def test_progress_line_shows_aggregate_speed_across_tracks(self):
+        self.client.progress_enabled = True
+        with patch('jiosaavn_core.time.monotonic', side_effect=[0, 0, 0, 0, 1, 1, 1, 1]):
+            self.client._start_progress(3)
+            self.client._track_started(1, 'First Song')
+            self.client._track_started(2, 'Second Song')
+            self.client._track_progress(1, 1024 * 1024, None)
+            self.client._track_progress(2, 1024 * 1024, None)
+        self.assertIn('2.0MB/s', self.last_bar())
+        self.assertEqual(self.client._progress_bytes_received, 2 * 1024 * 1024)
+
+    def test_unknown_length_streams_contribute_to_aggregate_speed(self):
+        self.client.progress_enabled = True
+        chunk = b'x' * (1024 * 1024)
+        responses = [response(), response()]
+        for result in responses:
+            result.iter_content.return_value = [chunk]
+        self.session.get.side_effect = responses
+        clock = [0]
+        with patch('jiosaavn_core.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('shutil.get_terminal_size', return_value=os.terminal_size((160, 20))):
+            self.client._start_progress(2)
+            self.client._track_started(1, 'First Song')
+            self.client._track_started(2, 'Second Song')
+            for pos in (1, 2):
+                if pos == 2:
+                    clock[0] = 1
+                path = Path(self.temp.name) / f'track-{pos}.m4a'
+                self.client.download_file(
+                    'https://example.com/audio', path,
+                    progress=lambda done, total, pos=pos: self.client._track_progress(
+                        pos, done, total))
+        self.assertEqual(self.client._progress_bytes_received, 2 * len(chunk))
+        self.assertIn('2.0MB/s', self.last_bar())
+        self.assertIn('01 1.0MB First Song', self.last_bar())
+        self.assertIn('02 1.0MB Second Song', self.last_bar())
+
+    def test_aggregate_speed_excludes_resumed_bytes(self):
+        self.client.progress_enabled = True
+        with patch('jiosaavn_core.time.monotonic', side_effect=[0, 0, 0, 1, 1]):
+            self.client._start_progress(2)
+            self.client._track_started(1, 'Resumed Song')
+            self.client._track_progress_baseline(1, 100)
+            self.client._track_progress(1, 150, 200)
+        self.assertEqual(self.client._progress_bytes_received, 50)
+
+    def test_progress_line_shows_elapsed_collection_time(self):
+        self.client.progress_enabled = True
+        with patch('jiosaavn_core.time.monotonic', return_value=3661):
+            self.client._start_progress(1, collection_started_at=0)
+        self.assertIn('Elapsed 1:01:01', self.last_bar())
+
+    def test_progress_line_shows_eta_after_two_tracks_complete(self):
+        self.client.progress_enabled = True
+        with patch('jiosaavn_core.time.monotonic',
+                   side_effect=[0, 0, 0, 10, 20, 30, 40, 50]), \
+                patch('shutil.get_terminal_size', return_value=os.terminal_size((80, 20))):
+            self.client._start_progress(5)
+            self.assertNotIn('ETA', self.last_bar())
+            self.client._track_started(3, 'Third Song')
+            self.client._advance_progress(1)
+            self.assertNotIn('ETA', self.last_bar())
+            self.client._advance_progress(2)
+            self.assertIn('ETA 30s', self.last_bar())
+            self.assertIn('Third Song', self.last_bar())
+            self.assertLess(core.display_width(self.last_bar()), 80)
+            self.client._advance_progress(3)
+            self.client._advance_progress(4)
+            self.client._advance_progress(5)
+        self.assertNotIn('ETA', self.last_bar())
+
+    def test_failed_tracks_contribute_to_eta_work_completed(self):
+        self.client.progress_enabled = True
+        clock = [0]
+
+        def fail_track(song_id, album_artist, song_pos, total_tracks, is_playlist,
+                       song_data=None):
+            self.client._track_started(song_pos, f'Track {song_pos}')
+            clock[0] = song_pos * 10
+            raise app.DownloadError('track failed')
+
+        self.client.processTrack = Mock(side_effect=fail_track)
+        with patch('jiosaavn_core.time.monotonic', side_effect=lambda: clock[0]):
+            self.client._start_progress(4, collection_started_at=0)
+            for pos in range(1, 5):
+                self.client._process_collection_track(
+                    'playlist', {'title': 'Pair'}, 'Pair', pos, 4,
+                    {'perma_url': f'{URL}{pos}'})
+        self.assertEqual(self.client.failed, 4)
+        self.assertIn('ETA 20s', self.output.getvalue())
+        self.assertIn('Elapsed 0:00:40', self.last_bar())
+        self.assertNotIn('ETA', self.last_bar())
+
+    def test_interrupted_unknown_length_download_keeps_speed_and_elapsed(self):
+        self.progress_collection(['Interrupted Song'])
+        self.client.workers = 1
+        chunk = b'x' * (2 * 1024 * 1024)
+        clock = [0]
+
+        def interrupted():
+            clock[0] = 1
+            yield chunk
+            raise requests.ConnectionError('lost connection')
+
+        result = response()
+        result.iter_content.return_value = interrupted()
+        self.session.get.return_value = result
+        with patch('jiosaavn_core.time.monotonic', side_effect=lambda: clock[0]):
+            self.client.process_collection('playlist', 'list')
+        self.assertEqual(self.client.failed, 1)
+        self.assertEqual(self.client._progress_bytes_received, len(chunk))
+        self.assertEqual(self.client._progress_done, 1)
+        self.assertIn('2.0MB/s', self.output.getvalue())
+        self.assertIn('Download interrupted: lost connection', self.output.getvalue())
+        self.assertIn('Elapsed 0:00:01', self.last_bar())
+        partials = list(Path(self.temp.name).rglob('*.part'))
+        self.assertEqual(len(partials), 1)
+        self.assertEqual(partials[0].read_bytes(), chunk)
+
+    def test_percent_is_only_redrawn_when_it_changes(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.client._track_progress(2, 45, 100)
+        before = len(self.output.getvalue())
+        self.client._track_progress(2, 45, 100)  # same whole percent
+        self.assertEqual(len(self.output.getvalue()), before)
+        self.client._track_progress(2, 46, 100)
+        self.assertGreater(len(self.output.getvalue()), before)
+
+    def test_percent_of_a_finished_or_unknown_track_is_ignored(self):
+        self.client.progress_enabled = True
+        self.client._start_progress(3)
+        self.client._track_started(2, 'Second Song')
+        self.client._track_finished(2, 3, 'Second Song', 'Artist', 'Downloaded')
+        self.client._track_progress(2, 50, 100)  # late callback from a finished track
+        self.client._track_progress(3, 50, 100)  # a track that never started
+        self.assertNotIn('50%', self.output.getvalue())
+
+    def test_progress_mode_shows_real_download_percent(self):
+        self.progress_collection(['First Song'])
+        data = FIXTURE.read_bytes()
+        result = response(data, headers={'Content-Length': str(len(data))})
+        result.iter_content.return_value = [data[:100], data[100:]]
+        self.session.get.return_value = result
+        self.client.process_collection('playlist', 'list')
+        self.assertEqual(self.client.downloaded, 1)
+        self.assertRegex(self.output.getvalue(), r'01 \d+% First Song')
+
+    def test_progress_line_fits_the_terminal_width(self):
+        self.client.progress_enabled = True
+        with patch('shutil.get_terminal_size', return_value=os.terminal_size((40, 20))):
+            self.client._start_progress(3)
+            self.client._track_started(1, 'A very long song title ' * 5)
+            self.client._track_started(2, '日本語のとても長いタイトル' * 5)
+        for line in self.output.getvalue().split('\r'):
+            self.assertLess(core.display_width(line.replace('\x1b[K', '')), 40)
+
+    def test_display_width_counts_wide_and_combining_characters(self):
+        self.assertEqual(core.display_width('abc'), 3)
+        self.assertEqual(core.display_width('日本'), 4)
+        self.assertEqual(core.display_width('é'), 1)  # letter plus a combining accent
+        self.assertEqual(core.display_width('क्'), 1)  # letter plus a virama
+
+    def test_plain_output_is_unchanged_without_the_bar(self):
+        self.prepare_track()
+        self.client.processTrack('token')
+        output = self.output.getvalue()
+        self.assertIn('[1/1]', output)
+        self.assertNotIn('Downloaded:', output)
+        self.assertNotIn('\r', output)
+
+    def test_progress_bar_tracks_collection_completion(self):
+        self.client.metadata = Mock(return_value={
+            'title': 'My Album',
+            'songs': [{'perma_url': URL} for _ in range(4)],
+        })
+        self.client.processTrack = Mock()
+        self.client.progress_enabled = True
+        self.client.process_collection('album', 'token')
+        output = self.output.getvalue()
+        self.assertIn('Downloading [', output)
+        self.assertIn('4/4', output)
+
+    def test_collection_fetches_all_playlist_pages(self):
+        pages = {
+            None: {
+                'listname': 'Long Playlist',
+                'list_count': 5,
+                'songs': [{'id': f'song-{index}', 'perma_url': URL} for index in range(2)],
+            },
+            2: {'songs': [{'id': f'song-{index}', 'perma_url': URL} for index in range(2, 4)]},
+            3: {'songs': [{'id': 'song-4', 'perma_url': URL}]},
+        }
+        self.client.metadata = Mock(side_effect=lambda kind, token, page=None: pages[page])
+        self.client.processTrack = Mock()
+        self.client.process_collection('playlist', 'playlist-token')
+        self.assertEqual(self.client.processTrack.call_count, 5)
+        self.assertEqual(
+            {call.kwargs['song_data']['id'] for call in self.client.processTrack.call_args_list},
+            {f'song-{index}' for index in range(5)})
+        self.assertEqual(
+            self.client.metadata.call_args_list,
+            [call('playlist', 'playlist-token'),
+             call('playlist', 'playlist-token', page=2),
+             call('playlist', 'playlist-token', page=3)])
+
+    def test_collection_ignores_invalid_reported_track_count(self):
+        for reported_total in (-1, 'not-a-number'):
+            with self.subTest(reported_total=reported_total):
+                self.client.metadata = Mock(return_value={
+                    'title': 'Metadata edge case',
+                    'list_count': reported_total,
+                    'songs': [{'perma_url': URL + '1'}],
+                })
+                self.client.processTrack = Mock()
+                self.client.process_collection('playlist', 'token')
+                self.client.processTrack.assert_called_once()
+                self.assertEqual(self.client.metadata.call_count, 1)
+
+    def test_album_and_playlist_download_all_tracks(self):
+        self.prepare_track()
+        for kind in ('album', 'playlist'):
+            with self.subTest(kind=kind):
+                # Distinct song IDs: tracks that share an ID are skipped as
+                # duplicates, which would depend on worker timing.
+                collection = {'title': f'Test {kind}', 'primary_artists': 'Artist',
+                              'songs': [{'perma_url': URL + '1'}, {'perma_url': URL + '2'}]}
+                self.client.metadata.side_effect = lambda item_kind, token: (
+                    {'songs': [{**SONG, 'id': token}]} if item_kind == 'song' else collection)
+                self.client.process_collection(kind, 'collection-token')
+        paths = list(Path(self.temp.name).rglob('*.m4a'))
+        self.assertEqual(len(paths), 4)
+        self.assertEqual(sorted(MP4(path)['trkn'][0] for path in paths),
+                         [(1, 2), (1, 2), (2, 2), (2, 2)])
+
+    def test_auth_url_and_quality(self):
+        self.client.api = Mock(return_value={'auth_url': 'https://web.example/path/web-file?sig=web'})
+        self.assertEqual(self.client.getCdnURL('enc'), 'https://aac.example/path/web-file?sig=web')
+        self.assertEqual(self.client.api.call_args.kwargs['bitrate'], '320')
+
+
+class InteractiveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.client = Mock(output=Path(self.temp.name), quality="320", overwrite=False)
+        self.client.search.return_value = [
+            {"kind": "song", "title": "Song One", "subtitle": "Artist",
+             "url": "https://www.jiosaavn.com/song/one/token1"},
+            {"kind": "album", "title": "Album Two", "subtitle": "Artist",
+             "url": "https://www.jiosaavn.com/album/two/token2"},
+        ]
+
+    def test_selection_and_settings_flow(self):
+        answers = iter(("artist", "9", "2,1", "", "invalid", "160", "y", "yes"))
+        output = io.StringIO()
+        selected = app.interactive_setup(self.client, lambda _prompt: next(answers),
+                                         lambda line: output.write(line + "\n"))
+        self.assertEqual(selected, [
+            "https://www.jiosaavn.com/album/two/token2",
+            "https://www.jiosaavn.com/song/one/token1",
+        ])
+        self.assertEqual(self.client.quality, "160")
+        self.assertTrue(self.client.overwrite)
+        self.assertIn("Choose numbers from 1 to 2", output.getvalue())
+        self.assertIn("Choose 12, 48, 96, 160, or 320 kbps", output.getvalue())
+
+    def test_empty_search_retries_query_and_selection_can_choose_all(self):
+        self.client.search.side_effect = [[], self.client.search.return_value]
+        answers = iter(("missing", "artist", "all", "", "", "n", "y"))
+        output = io.StringIO()
+        selected = app.interactive_setup(self.client, lambda _prompt: next(answers),
+                                         lambda line: output.write(line + "\n"))
+        self.assertEqual(len(selected), 2)
+        self.assertFalse(self.client.overwrite)
+        self.assertIn("No supported songs", output.getvalue())
+        self.assertEqual(self.client.search.call_count, 2)
+
+    def test_cancel_at_query_or_final_confirmation_does_not_select(self):
+        self.assertIsNone(app.interactive_setup(
+            self.client, lambda _prompt: "q", lambda _line: None))
+        answers = iter(("artist", "1", "", "", "", "n"))
+        self.assertIsNone(app.interactive_setup(
+            self.client, lambda _prompt: next(answers), lambda _line: None))
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        patcher = patch.object(core, 'config_path', return_value=Path(folder.name) / 'config.json')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_mixed_url_types(self):
+        with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+            client = cls.return_value
+            client.downloaded = client.skipped = client.failed = 0
+            client.failures = []
+            self.assertEqual(app.main([URL, 'https://jiosaavn.com/album/name/album-token',
+                                       'https://jiosaavn.com/featured/name/playlist-token']), 0)
+            client.processTrack.assert_called_once_with('token')
+            self.assertEqual(client.process_collection.call_args_list,
+                             [unittest.mock.call('album', 'album-token'),
+                              unittest.mock.call('playlist', 'playlist-token')])
+
+    def test_interactive_requires_tty(self):
+        stdin = Mock()
+        stdin.isatty.return_value = False
+        with patch.object(app.sys, 'stdin', stdin), contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(app.main(['--interactive']), 2)
+        self.assertIn('requires an interactive terminal', errors.getvalue())
+
+    def test_interactive_selection_uses_existing_download_dispatch(self):
+        stdin = Mock()
+        stdin.isatty.return_value = True
+        with patch.object(app.sys, 'stdin', stdin), patch.object(app, 'interactive_setup',
+                return_value=[URL]), patch.object(app, 'resolve_url', return_value=('song', 'token')), \
+                patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+            client = cls.return_value
+            client.downloaded = client.skipped = client.failed = 0
+            client.failures = []
+            self.assertEqual(app.main(['--interactive']), 0)
+            client.processTrack.assert_called_once_with('token')
+            client.session.close.assert_called_once()
+
+    def test_interactive_cancel_closes_session_without_download(self):
+        stdin = Mock()
+        stdin.isatty.return_value = True
+        with patch.object(app.sys, 'stdin', stdin), patch.object(app, 'interactive_setup',
+                return_value=None), patch.object(app, 'Jiosaavn') as cls, \
+                contextlib.redirect_stdout(io.StringIO()):
+            client = cls.return_value
+            self.assertEqual(app.main(['--interactive']), 0)
+            client.processTrack.assert_not_called()
+            client.process_collection.assert_not_called()
+            client.session.close.assert_called_once()
+
+    def test_url_list_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'urls.txt'
+            path.write_text('\ufeff# My songs\n\n' + URL + '\nhttps://jiosaavn.com/album/name/album-token\n', encoding='utf-8')
+            self.assertEqual(list(app.input_urls(['first'], [str(path)])),
+                             ['first', URL, 'https://jiosaavn.com/album/name/album-token'])
+            with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+                client = cls.return_value
+                client.downloaded = client.skipped = client.failed = 0
+                client.failures = []
+                self.assertEqual(app.main(['--input-file', str(path)]), 0)
+                client.processTrack.assert_called_once_with('token')
+                client.process_collection.assert_called_once_with('album', 'album-token')
+
+    def test_url_list_stdin(self):
+        with patch.object(app.sys, 'stdin', io.StringIO('# Songs\n' + URL + '\n')):
+            self.assertEqual(list(app.input_urls([], ['-'])), [URL])
+
+    def test_empty_url_list_exit_status(self):
+        with patch.object(app.sys, 'stdin', io.StringIO('# Empty list\n')), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(app.main(['-i', '-']), 1)
+
+    def test_missing_url_list_exit_status(self):
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(app.main(['-i', str(Path(folder) / 'missing.txt')]), 1)
+
+    def test_workers_option_is_passed_to_the_client(self):
+        for arguments, expected in (([URL], core.COLLECTION_WORKERS),
+                                    ([URL, '--workers', '2'], 2),
+                                    ([URL, '--workers', '16'], 16)):
+            with self.subTest(arguments=arguments):
+                with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+                    client = cls.return_value
+                    client.downloaded = client.skipped = client.failed = 0
+                    client.failures = []
+                    self.assertEqual(app.main(arguments), 0)
+                    self.assertEqual(cls.call_args.kwargs['workers'], expected)
+
+    def test_genre_option_is_passed_to_the_client(self):
+        for arguments, expected in (([URL], None),
+                                    ([URL, '--genre', 'Bollywood'], 'Bollywood'),
+                                    ([URL, '--genre', '  Indian  Pop '], 'Indian Pop')):
+            with self.subTest(arguments=arguments):
+                with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+                    client = cls.return_value
+                    client.downloaded = client.skipped = client.failed = 0
+                    client.failures = []
+                    self.assertEqual(app.main(arguments), 0)
+                    self.assertEqual(cls.call_args.kwargs['genre'], expected)
+
+    def test_blank_genre_is_rejected(self):
+        for blank in ('', '   '):
+            with self.subTest(genre=blank):
+                with contextlib.redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit) as exc:
+                    app.main([URL, '--genre', blank])
+                self.assertEqual(exc.exception.code, 2)
+                self.assertIn('genre', errors.getvalue())
+
+    def test_reject_invalid_options(self):
+        for args in ([URL, '--timeout', '0'], [URL, '--timeout', 'nan'],
+                     [URL, '--quality', '999'], [URL, '--quiet', '--verbose'], [],
+                     [URL, '--workers', '0'], [URL, '--workers', '-1'],
+                     [URL, '--workers', '17'], [URL, '--workers', 'many'],
+                     [URL, '--workers', '2.5']):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
+                app.main(args)
+            self.assertEqual(exc.exception.code, 2)
+
+    def test_version_bumped_for_feature_release(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as exc:
+            app.main(['--version'])
+        self.assertEqual(exc.exception.code, 0)
+        self.assertIn(core.__version__, output.getvalue())
+
+    def test_dry_run_flag_configures_client(self):
+        with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+            client = cls.return_value
+            client.downloaded = client.skipped = client.failed = client.planned = 0
+            client.failures = []
+            self.assertEqual(app.main([URL, '--dry-run', '--quiet']), 0)
+            self.assertEqual(cls.call_args.kwargs['dry_run'], True)
+            self.assertEqual(cls.call_args.kwargs['quiet'], True)
+            self.assertEqual(cls.call_args.kwargs['verbose'], False)
+
+    def test_multiple_urls_and_exit_status(self):
+        with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            client = cls.return_value
+            client.downloaded = client.skipped = client.failed = 0
+            client.failures = []
+            client.record_failure.side_effect = lambda *args: setattr(client, 'failed', 1)
+            result = app.main(['https://example.com/bad', URL, '--no-cover'])
+            self.assertEqual(result, 1)
+            client.processTrack.assert_called_once_with('token')
+            client.session.close.assert_called_once()
+
+    def test_interrupt_exit_status(self):
+        with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stderr(io.StringIO()):
+            cls.return_value.processTrack.side_effect = KeyboardInterrupt
+            self.assertEqual(app.main([URL]), 130)
+            cls.return_value.session.close.assert_called_once()
+
+    def run_with_failures(self, failures, *extra, failed=1):
+        """Run main() against a mocked client that reports `failures`."""
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            client = cls.return_value
+            client.downloaded = client.skipped = 0
+            client.failed = failed
+            client.failures = list(failures)
+            code = app.main([URL, *extra])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_final_summary_lists_failed_tracks(self):
+        failure = core.Failure('Song A (track 2 of Mix)', 'Audio is unavailable', URL + '1')
+        code, out, _ = self.run_with_failures([failure])
+        self.assertEqual(code, 1)
+        self.assertIn('Failed (1):', out)
+        self.assertIn('Song A (track 2 of Mix): Audio is unavailable', out)
+
+    def test_final_summary_has_no_failed_section_when_all_succeed(self):
+        code, out, _ = self.run_with_failures([], failed=0)
+        self.assertEqual(code, 0)
+        self.assertNotIn('Failed (', out)
+
+    def test_quiet_run_skips_the_failed_summary(self):
+        failure = core.Failure('Song A', 'no audio', URL + '1')
+        _, out, _ = self.run_with_failures([failure], '--quiet')
+        self.assertNotIn('Failed (', out)
+
+    def test_failed_file_saves_retryable_urls_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'failed.txt'
+            failures = [core.Failure('A', 'x', URL + '1'), core.Failure('A again', 'x', URL + '1'),
+                        core.Failure('No URL', 'x', None), core.Failure('B', 'y', URL + '2')]
+            _, out, _ = self.run_with_failures(failures, '--failed-file', str(path))
+            self.assertEqual(list(app.input_urls([], [str(path)])), [URL + '1', URL + '2'])
+            self.assertTrue(path.read_text(encoding='utf-8').startswith(core.FAILED_FILE_MARKER))
+            self.assertIn('Saved 2 failed URLs', out)
+
+    def test_failed_file_is_removed_after_a_clean_run(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'failed.txt'
+            core.save_failed_urls(path, [core.Failure('A', 'x', URL + '1')])
+            self.assertTrue(path.exists())
+            self.run_with_failures([], '--failed-file', str(path), failed=0)
+            self.assertFalse(path.exists())
+
+    def test_failed_file_never_replaces_a_file_it_did_not_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'my-urls.txt'
+            path.write_text('my own list\n' + URL + '\n', encoding='utf-8')
+            before = path.read_text(encoding='utf-8')
+            failure = core.Failure('A', 'x', URL + '1')
+            code, _, err = self.run_with_failures([failure], '--failed-file', str(path))
+            self.assertEqual(path.read_text(encoding='utf-8'), before)
+            self.assertIn('not created by --failed-file', err)
+            self.assertEqual(code, 1)
+            self.run_with_failures([], '--failed-file', str(path), failed=0)  # clean run
+            self.assertEqual(path.read_text(encoding='utf-8'), before)
+
+    def test_failed_file_round_trip_through_the_real_client(self):
+        with tempfile.TemporaryDirectory() as folder:
+            session = Mock()
+            session.get.return_value = response(FIXTURE.read_bytes())
+            titles = {'token1': 'First Song', 'token2': 'Second Song'}
+            collection = {'title': 'Mix', 'songs': [{'perma_url': f'{URL}1'}, {'perma_url': f'{URL}2'}]}
+
+            def make(*args, **kwargs):
+                client = core.Jiosaavn(*args, session=session, **kwargs)
+                client.metadata = Mock(side_effect=lambda kind, token, page=None: (
+                    {'songs': [{**SONG, 'id': token, 'song': titles[token],
+                                'encrypted_media_url': 'enc-' + token}]}
+                    if kind == 'song' else collection))
+
+                def cdn(encrypted, **kwargs):
+                    if encrypted.endswith('token2'):
+                        raise core.DownloadError('Audio is unavailable')
+                    return 'https://aac.example/song.m4a'
+
+                client.getCdnURL = Mock(side_effect=cdn)
+                return client
+
+            path = Path(folder) / 'failed.txt'
+            out = io.StringIO()
+            with patch.object(app, 'Jiosaavn', side_effect=make), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = app.main(['https://jiosaavn.com/featured/mix/list-token', '-o', folder,
+                                 '--no-cover', '--no-lyrics', '--failed-file', str(path)])
+            self.assertEqual(code, 1)
+            self.assertIn('Failed (1):', out.getvalue())
+            self.assertIn('Second Song (track 2 of Mix): Audio is unavailable', out.getvalue())
+            self.assertEqual(list(app.input_urls([], [str(path)])), [f'{URL}2'])
+
+
+class FolderSettingsTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.path = Path(self.folder.name) / 'settings/config.json'
+        patcher = patch.object(core, 'config_path', return_value=self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_save_folder_without_download(self):
+        library = Path(self.folder.name) / 'Music Library'
+        with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(app.main(['--set-output', str(library)]), 0)
+            cls.assert_not_called()
+        self.assertEqual(app.saved_output(), str(library.resolve()))
+        self.assertFalse(library.exists())
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+
+    def test_relative_setting_is_saved_as_absolute(self):
+        self.assertEqual(app.save_output('My Music'), str(Path('My Music').resolve()))
+        self.assertTrue(Path(app.saved_output()).is_absolute())
+
+    def test_saved_folder_and_one_time_override(self):
+        library = app.save_output(str(Path(self.folder.name) / 'Music'))
+        for arguments, expected in (([URL], library), ([URL, '-o', 'Other'], 'Other')):
+            with patch.object(app, 'Jiosaavn') as cls, contextlib.redirect_stdout(io.StringIO()):
+                cls.return_value.failed = 0
+                self.assertEqual(app.main(arguments), 0)
+                self.assertEqual(cls.call_args.args[0], expected)
+        self.assertEqual(app.saved_output(), library)
+
+    def test_show_effective_folder(self):
+        library = app.save_output(str(Path(self.folder.name) / 'Music'))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(app.main(['--show-output']), 0)
+        self.assertEqual(output.getvalue().strip(), library)
+
+    def test_default_without_settings(self):
+        self.assertEqual(app.saved_output(), 'Downloads')
+
+    def test_invalid_settings_are_actionable_and_can_be_repaired(self):
+        self.path.parent.mkdir()
+        for data in ('{broken', '[]', '{"output": null}', '{"output": ""}'):
+            self.path.write_text(data)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(app.main(['--show-output']), 1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(app.main(['--show-output', '-o', self.folder.name]), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(app.main(['--set-output', self.folder.name]), 0)
+        self.assertEqual(app.saved_output(), str(Path(self.folder.name).resolve()))
+
+    def test_file_cannot_be_default_folder(self):
+        file = Path(self.folder.name) / 'song.m4a'
+        file.write_bytes(b'file')
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(app.main(['--set-output', str(file)]), 1)
+        self.assertFalse(self.path.exists())
+
+    def test_empty_folder_is_rejected(self):
+        for arguments in (['--set-output', ''], ['--show-output', '-o', '']):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(app.main(arguments), 1)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,4 @@
+include LICENSE
+include requirements.txt
+include assets/logo.svg
+recursive-include tests *.py *.m4a

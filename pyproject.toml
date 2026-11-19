@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiosaavn-dl"
+dynamic = ["version", "dependencies"]
+description = "Download JioSaavn songs, albums, and playlists with metadata and artwork"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+keywords = ["jiosaavn", "music", "downloader", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+jiosaavn-dl = "jiosaavn:main"
+
+[tool.setuptools]
+py-modules = ["jiosaavn", "jiosaavn_core", "progress_handler"]
+
+[tool.setuptools.dynamic]
+version = {attr = "jiosaavn_core.__version__"}
+dependencies = {file = ["requirements.txt"]}
