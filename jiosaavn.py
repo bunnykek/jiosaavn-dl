@@ -26,7 +26,6 @@ from jiosaavn_core import (
     clean_text,
     config_path,
     cyan,
-    DownloadError,
     green,
     is_true,
     load_config,
@@ -106,11 +105,16 @@ def speed_limit(value):
     if value[-1] in multipliers:
         try:
             num = float(value[:-1])
+            if not math.isfinite(num) or num <= 0:
+                raise argparse.ArgumentTypeError("speed limit must be a positive number")
             return int(num * multipliers[value[-1]])
         except ValueError:
             raise argparse.ArgumentTypeError("invalid speed limit format (e.g. 5M, 500K, 1000)")
     try:
-        return int(value)
+        num = int(value)
+        if num <= 0:
+            raise argparse.ArgumentTypeError("speed limit must be a positive number")
+        return num
     except ValueError:
         raise argparse.ArgumentTypeError("invalid speed limit format (e.g. 5M, 500K, 1000)")
 
@@ -431,7 +435,6 @@ def handle_config(argv):
 def export_playlist(client, playlist_token, format_type, output_dir):
     """Export a playlist to M3U/M3U8/PLS format."""
     from pathlib import Path
-    import urllib.parse
 
     try:
         data = client.metadata("playlist", playlist_token)
@@ -450,9 +453,11 @@ def export_playlist(client, playlist_token, format_type, output_dir):
     safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(". ")
     if not safe_name:
         safe_name = "playlist"
+    if re.fullmatch(r"(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", safe_name, re.IGNORECASE):
+        safe_name = f"_{safe_name}"
 
     # Determine file extension
-    ext = format_type if format_type != "m3u8" else "m3u"
+    ext = format_type
     playlist_file = Path(output_dir) / f"{safe_name}.{ext}"
 
     try:
