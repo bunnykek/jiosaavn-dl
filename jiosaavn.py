@@ -3,6 +3,7 @@
 
 import argparse
 import math
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -229,7 +230,7 @@ def build_parser():
             cfg = {
                 "output": "Downloads",
                 "quality": "320",
-                "workers": COLLECTION_WORKERS,
+               "workers": 2 if (os.environ.get("TERMUX_VERSION") or Path("/data/data/com.termux").exists()) else 4,
                 "genre": None,
                 "template": None,
                 "overwrite": False,
